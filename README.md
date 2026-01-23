@@ -5,7 +5,7 @@ Scraper automatizado (Selenium) que percorre os estados e municípios no portal 
 ## Visão Geral
 - **Navegação automatizada:** Usa Selenium + Chrome para interagir com filtros (Estado, Município, Curso, IES, Conceito).
 - **Curso alvo:** Seleção exata de "MEDICINA" (evita confusão com Biomedicina).
-- **Categorias:** Coleta notas por categoria (Ampla, PPIQ, PCD) e a nota do último aprovado na lista atual.
+- **Categorias:** Coleta notas por categoria (Ampla, PPIQ, PCD) e a nota do último Pré-Selecionado na lista atual.
 - **CAPTCHA:** Requer intervenção humana quando solicitado; o script pausa e aguarda confirmação no terminal.
 - **Persistência incremental:** Escreve/atualiza o arquivo CSV a cada município processado.
 
@@ -82,7 +82,13 @@ ESTADOS = {
 ```
 
 ## Estrutura do Projeto
-- [main.py](main.py): script principal do scraper.
+- [main.py](main.py): ponto de entrada que apenas chama a automação.
+- [src/app.py](src/app.py): orquestração do fluxo principal.
+- Configuração: [src/config/settings.py](src/config/settings.py) (FAST_MODE, BASE_URL, colunas), [src/config/estados.py](src/config/estados.py) (mapa UF → nome), reexportados por [src/config/__init__.py](src/config/__init__.py).
+- Núcleo: [src/core/browser.py](src/core/browser.py) (WebDriver), [src/core/utils.py](src/core/utils.py) (delays/normalização), reexportados por [src/core/__init__.py](src/core/__init__.py).
+- Ações de UI: [src/actions/select2.py](src/actions/select2.py) (Select2), [src/actions/radio.py](src/actions/radio.py) (rádios), reexportados em [src/actions/__init__.py](src/actions/__init__.py).
+- Navegação: [src/navigation/flow.py](src/navigation/flow.py) (Nova Consulta, filtros, preparo inicial), reexportado por [src/navigation/__init__.py](src/navigation/__init__.py).
+- Scraping: [src/scraping/runner.py](src/scraping/runner.py) (loop principal/CSV), [src/scraping/table.py](src/scraping/table.py) (tabela, Pré-Selecionado, categorias), [src/scraping/extract.py](src/scraping/extract.py) (modal ENEM), reexportados por [src/scraping/__init__.py](src/scraping/__init__.py).
 - [requirements.txt](requirements.txt): dependências Python.
 - [notas_fies_medicina.csv](notas_fies_medicina.csv): saída gerada/atualizada pelo script.
 
