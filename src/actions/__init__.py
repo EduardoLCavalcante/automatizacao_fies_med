@@ -1,6 +1,7 @@
 from .select2 import (
     select2,
     select2_exact,
+    esperar_select2_habilitado,
     curso_existe,
     listar_opcoes_select2,
     listar_opcoes_select2_rapido,
@@ -13,6 +14,7 @@ from .radio import selecionar_radio_por_texto, selecionar_radio_fies_social
 __all__ = [
     "select2",
     "select2_exact",
+    "esperar_select2_habilitado",
     "curso_existe",
     "listar_opcoes_select2",
     "listar_opcoes_select2_rapido",

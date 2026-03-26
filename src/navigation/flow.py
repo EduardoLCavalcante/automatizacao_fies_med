@@ -4,14 +4,20 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
-from src.core import BrowserContext, human_delay
+from src.core import BrowserContext, human_delay, remove_loading_overlay
 from src.config import BASE_URL
-from src.actions import select2, select2_exact
+from src.actions import (
+    select2,
+    select2_exact,
+    esperar_select2_habilitado,
+    selecionar_radio_fies_social,
+)
 
 
 def preparar_primeira_pagina(ctx: BrowserContext) -> None:
     driver, wait = ctx.driver, ctx.wait
     driver.get(BASE_URL)
+    remove_loading_overlay(ctx)
     print("⚠️ Resolva o CAPTCHA e pressione ENTER para continuar...")
     input()
     try:
@@ -33,6 +39,7 @@ def abrir_nova_consulta(ctx: BrowserContext) -> bool:
     except TimeoutException:
         return False
 
+    remove_loading_overlay(ctx)
     try:
         wait.until(EC.presence_of_element_located((By.ID, "select2-noEstado-container")))
     except TimeoutException:
@@ -40,6 +47,7 @@ def abrir_nova_consulta(ctx: BrowserContext) -> bool:
 
     print("⚠️ Resolva o CAPTCHA e pressione ENTER para continuar...")
     input()
+    remove_loading_overlay(ctx)
     try:
         wait.until(EC.presence_of_element_located((By.ID, "select2-noEstado-container")))
     except TimeoutException:
@@ -49,6 +57,12 @@ def abrir_nova_consulta(ctx: BrowserContext) -> bool:
 
 def aplicar_filtros(ctx: BrowserContext, estado: str, municipio: str | None = None, curso: str | None = "MEDICINA") -> bool:
     """Aplica estado e, opcionalmente, município e curso na página principal."""
+    remove_loading_overlay(ctx)
+    if not selecionar_radio_fies_social(ctx):
+        print("⚠️ Não foi possível selecionar 'Fies Social'")
+        return False
+    human_delay(ctx.fast_mode, 0.1, 0.3)
+
     try:
         select2(ctx, "select2-noEstado-container", estado)
         human_delay(ctx.fast_mode, 0.2, 0.5)
@@ -63,6 +77,7 @@ def aplicar_filtros(ctx: BrowserContext, estado: str, municipio: str | None = No
             return False
         if curso:
             try:
+                esperar_select2_habilitado(ctx, "select2-noCursosPublico-container")
                 select2_exact(ctx, "select2-noCursosPublico-container", curso)
                 human_delay(ctx.fast_mode, 0.2, 0.5)
             except TimeoutException:

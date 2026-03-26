@@ -31,6 +31,16 @@ def build_browser() -> BrowserContext:
     return BrowserContext(driver=driver, wait=wait, fast_mode=FAST_MODE)
 
 
+def remove_loading_overlay(ctx: BrowserContext) -> None:
+    """Remove overlay de loading quando presente para evitar bloqueios de clique."""
+    try:
+        ctx.driver.execute_script(
+            "const el = document.getElementById('loadingDiv'); if (el) el.remove();"
+        )
+    except Exception:
+        pass
+
+
 def shutdown_browser(ctx: BrowserContext) -> None:
     try:
         ctx.driver.quit()
