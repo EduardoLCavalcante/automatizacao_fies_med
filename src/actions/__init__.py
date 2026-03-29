@@ -9,7 +9,14 @@ from .select2 import (
     select2_exact_multi,
     listar_opcoes_select2_multi,
 )
-from .radio import selecionar_radio_por_texto, selecionar_radio_fies_social
+from .radio import (
+    selecionar_radio_por_texto,
+    selecionar_radio_fies_social,
+    selecionar_radio_fies_regular,
+    selecionar_radio_fies,
+    verificar_modalidade_selecionada,
+    FIES_RADIO_CONFIG,
+)
 
 __all__ = [
     "select2",
@@ -23,4 +30,8 @@ __all__ = [
     "listar_opcoes_select2_multi",
     "selecionar_radio_por_texto",
     "selecionar_radio_fies_social",
+    "selecionar_radio_fies_regular",
+    "selecionar_radio_fies",
+    "verificar_modalidade_selecionada",
+    "FIES_RADIO_CONFIG",
 ]

@@ -1,6 +1,7 @@
 """Ações de interação com Select2 (listas e seleções)."""
 
-from typing import Iterable, List
+import time
+from typing import Iterable, List, Optional
 import unicodedata
 import re
 from selenium.webdriver.common.by import By
@@ -10,11 +11,27 @@ from selenium.common.exceptions import TimeoutException, StaleElementReferenceEx
 from selenium.webdriver.support.ui import WebDriverWait
 
 from src.core import BrowserContext, human_delay
+from src.config import MAX_RETRIES, RETRY_DELAY
 
 
-def esperar_select2_habilitado(ctx: BrowserContext, container_id: str, timeout: int | None = None):
+def _get_logger():
+    """Importação lazy do logger para evitar imports circulares."""
+    from src.core.timeout_log import get_logger
+    return get_logger()
+
+
+def esperar_select2_habilitado(
+    ctx: BrowserContext,
+    container_id: str,
+    timeout: Optional[int] = None,
+    max_attempts: int = MAX_RETRIES,
+):
+    """
+    Aguarda um Select2 ficar habilitado, com retry.
+    """
     limite = timeout or (45 if ctx.fast_mode else 60)
     driver = ctx.driver
+    logger = _get_logger()
 
     def _habilitado(d):
         el = d.find_element(By.ID, container_id)
@@ -24,47 +41,108 @@ def esperar_select2_habilitado(ctx: BrowserContext, container_id: str, timeout: 
             return False
         return el
 
-    return WebDriverWait(
-        driver,
-        limite,
-        poll_frequency=0.3,
-        ignored_exceptions=(StaleElementReferenceException,),
-    ).until(_habilitado)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = WebDriverWait(
+                driver,
+                limite,
+                poll_frequency=0.3,
+                ignored_exceptions=(StaleElementReferenceException,),
+            ).until(_habilitado)
+            
+            if attempt > 1:
+                logger.log_success_after_retry(
+                    operation="esperar_select2_habilitado",
+                    attempt=attempt,
+                    total_time=attempt * RETRY_DELAY,
+                )
+            return result
+            
+        except TimeoutException as e:
+            logger.log_timeout(
+                operation="esperar_select2_habilitado",
+                attempt=attempt,
+                max_attempts=max_attempts,
+                exception=e,
+                context={"container_id": container_id},
+            )
+            if attempt >= max_attempts:
+                raise
+            time.sleep(RETRY_DELAY)
 
 
-def select2(ctx: BrowserContext, container_id: str, texto: str) -> None:
+def select2(ctx: BrowserContext, container_id: str, texto: str, max_attempts: int = MAX_RETRIES) -> None:
+    """
+    Seleciona opção em Select2 digitando texto, com retry em caso de erro.
+    """
     driver, wait = ctx.driver, ctx.wait
-    container = wait.until(EC.element_to_be_clickable((By.ID, container_id)))
-    container.click()
+    logger = _get_logger()
+    
+    for attempt in range(1, max_attempts + 1):
+        try:
+            container = wait.until(EC.element_to_be_clickable((By.ID, container_id)))
+            container.click()
 
-    campo = wait.until(
-        EC.visibility_of_element_located(
-            (By.XPATH, "//input[contains(@class,'select2-search__field')]")
-        )
-    )
+            campo = wait.until(
+                EC.visibility_of_element_located(
+                    (By.XPATH, "//input[contains(@class,'select2-search__field')]")
+                )
+            )
 
-    campo.send_keys(Keys.CONTROL + "a")
-    campo.send_keys(Keys.BACKSPACE)
+            campo.send_keys(Keys.CONTROL + "a")
+            campo.send_keys(Keys.BACKSPACE)
 
-    if ctx.fast_mode:
-        campo.send_keys(texto)
-    else:
-        for letra in texto:
-            campo.send_keys(letra)
-            human_delay(ctx.fast_mode, 0.02, 0.02)
+            if ctx.fast_mode:
+                campo.send_keys(texto)
+            else:
+                for letra in texto:
+                    campo.send_keys(letra)
+                    human_delay(ctx.fast_mode, 0.02, 0.02)
 
-    if ctx.fast_mode:
-        human_delay(ctx.fast_mode, 0.04, 0.08)
-    else:
-        human_delay(ctx.fast_mode, 0.5, 0.7)
-    campo.send_keys(Keys.ENTER)
+            if ctx.fast_mode:
+                human_delay(ctx.fast_mode, 0.04, 0.08)
+            else:
+                human_delay(ctx.fast_mode, 0.5, 0.7)
+            campo.send_keys(Keys.ENTER)
+            
+            if attempt > 1:
+                logger.log_success_after_retry(
+                    operation="select2",
+                    attempt=attempt,
+                    total_time=attempt * RETRY_DELAY,
+                )
+            return
+            
+        except (TimeoutException, StaleElementReferenceException) as e:
+            logger.log_timeout(
+                operation="select2",
+                attempt=attempt,
+                max_attempts=max_attempts,
+                exception=e,
+                context={"container_id": container_id, "texto": texto},
+            )
+            
+            # Fecha dropdown se aberto
+            try:
+                driver.find_element(By.TAG_NAME, "body").click()
+            except Exception:
+                pass
+            
+            if attempt >= max_attempts:
+                raise
+            time.sleep(RETRY_DELAY)
 
 
-def select2_exact(ctx: BrowserContext, container_id: str, texto: str) -> None:
+def select2_exact(ctx: BrowserContext, container_id: str, texto: str, max_attempts: int = MAX_RETRIES) -> None:
+    """
+    Seleciona opção exata em Select2, com retry e logging.
+    """
     driver, wait = ctx.driver, ctx.wait
+    logger = _get_logger()
+    
     esperar_select2_habilitado(ctx, container_id)
 
-    for tentativa in range(3):
+    for tentativa in range(1, max_attempts + 1):
         try:
             container = wait.until(EC.element_to_be_clickable((By.ID, container_id)))
             container.click()
@@ -117,17 +195,43 @@ def select2_exact(ctx: BrowserContext, container_id: str, texto: str) -> None:
             if match:
                 match.click()
                 human_delay(ctx.fast_mode, 0.2, 0.5 if ctx.fast_mode else 0.8)
+                if tentativa > 1:
+                    logger.log_success_after_retry(
+                        operation="select2_exact",
+                        attempt=tentativa,
+                        total_time=tentativa * RETRY_DELAY,
+                    )
             else:
                 driver.find_element(By.TAG_NAME, "body").click()
                 raise TimeoutException(f"Opção exata não encontrada para: {texto}")
 
             driver.find_element(By.TAG_NAME, "body").click()
             return
-        except StaleElementReferenceException:
-            if tentativa == 2:
+            
+        except StaleElementReferenceException as e:
+            logger.log_timeout(
+                operation="select2_exact",
+                attempt=tentativa,
+                max_attempts=max_attempts,
+                exception=e,
+                context={"container_id": container_id, "texto": texto},
+            )
+            if tentativa >= max_attempts:
                 raise
             human_delay(ctx.fast_mode, 0.08, 0.16)
             continue
+            
+        except TimeoutException as e:
+            logger.log_timeout(
+                operation="select2_exact",
+                attempt=tentativa,
+                max_attempts=max_attempts,
+                exception=e,
+                context={"container_id": container_id, "texto": texto},
+            )
+            if tentativa >= max_attempts:
+                raise
+            time.sleep(RETRY_DELAY)
 
 
 def curso_existe(ctx: BrowserContext, nome_curso: str) -> bool:
