@@ -22,10 +22,35 @@ from src.actions import (
     select2_exact_multi,
     select2_pick_first,
     esperar_select2_habilitado,
+    select2_interagivel,
 )
-from src.config import CSV_COLUMNS, ESTADOS, MAX_RETRIES, RETRY_DELAY, FIES_MODALIDADE, FiesModalidade
-from src.core import BrowserContext, human_delay, normalizar_decimal_pt, get_logger
-from src.navigation import abrir_nova_consulta, aplicar_filtros, preparar_primeira_pagina, reiniciar_navegacao
+from src.config import CSV_COLUMNS, ESTADOS, MAX_RETRIES, RETRY_DELAY, FIES_MODALIDADE, FiesModalidade, PROGRESS_FILE, VALIDATE_COMPLETENESS
+from src.core import (
+    BrowserContext, 
+    human_delay, 
+    normalizar_decimal_pt, 
+    get_logger,
+    ProgressoGeral,
+    carregar_progresso_json,
+    salvar_progresso_json,
+    sincronizar_com_csv,
+    gerar_relatorio_retomada,
+    marcar_municipio_iniciado,
+    marcar_municipio_completo,
+    NetworkMonitor,
+    wait_for_network_idle,
+    wait_interactable_only,
+    execute_with_network_check,
+)
+from src.navigation import (
+    abrir_nova_consulta,
+    aplicar_filtros,
+    preparar_primeira_pagina,
+    reiniciar_navegacao,
+    nova_consulta_disponivel,
+    preparar_para_mudanca_estado,
+    trocar_estado_inteligente,
+)
 from src.scraping.extract import extrair_nota_enem_de_linha
 from src.scraping.table import (
     expandir_todos_candidatos,
@@ -86,10 +111,25 @@ def _nome_sem_codigo_ies(txt: str) -> str:
     return _IES_CODIGO_RE.sub("", txt or "").strip()
 
 
-def _norm_label(txt: str) -> str:
-    norm = unicodedata.normalize("NFD", txt or "")
+def _norm_label(txt: str, remover_codigo: bool = False) -> str:
+    """
+    Normaliza texto removendo acentos e convertendo para minúsculas.
+    
+    Args:
+        txt: Texto a normalizar
+        remover_codigo: Se True, remove código entre parênteses (ex: "IES (12345)" -> "IES")
+    """
+    texto = txt or ""
+    if remover_codigo:
+        texto = _nome_sem_codigo_ies(texto)
+    norm = unicodedata.normalize("NFD", texto)
     ascii_txt = norm.encode("ascii", "ignore").decode("ascii")
     return " ".join(ascii_txt.lower().split())
+
+
+def _norm_ies_para_comparacao(txt: str) -> str:
+    """Normaliza nome de IES para comparação (sempre remove código)."""
+    return _norm_label(txt, remover_codigo=True)
 
 
 def _ies_selecionado(ctx: BrowserContext, container_id: str, esperado: str) -> bool:
@@ -415,12 +455,14 @@ def buscar_notas_por_municipio(
     ies_alvo_nome_norm: Optional[Set[str]] = None,
     ies_alvo_codigo: Optional[Set[str]] = None,
     modalidade: Optional[str] = None,
+    progresso: Optional[ProgressoGeral] = None,
 ) -> Tuple[List[Dict], bool]:
     """
     Busca notas por município.
     
     Args:
         modalidade: Modalidade FIES a usar ("social", "regular", ou None para usar config)
+        progresso: Objeto de progresso para registrar IES coletadas
     """
     # Determinar modalidade
     modalidade_atual = modalidade or str(FIES_MODALIDADE.value)
@@ -430,7 +472,7 @@ def buscar_notas_por_municipio(
     ies_ja_salvos = ies_ja_salvos or set()
 
     select2(ctx, "select2-noMunicipio-container", municipio)
-    human_delay(ctx.fast_mode, 0.2, 0.5)
+    # Delay removido - select2 já tem delay interno
 
     if not curso_existe(ctx, "MEDICINA"):
         print("⏭️ Sem Medicina — pulando")
@@ -441,7 +483,7 @@ def buscar_notas_por_municipio(
     except TimeoutException:
         print("⚠️ Não foi possível selecionar MEDICINA (exato)")
         return resultados, pesquisa_executada
-    human_delay(ctx.fast_mode, 0.2, 0.5)
+    # Delay removido - select2_exact já tem delay interno
 
     ies_container_ids = ["select2-iesPublico-container"]
     try:
@@ -454,6 +496,10 @@ def buscar_notas_por_municipio(
         print("⚠️ Nenhuma IES listada para este município")
         return resultados, pesquisa_executada
     print(f"📑 IES encontradas ({len(ies_lista)}): {ies_lista}")
+    
+    # Marcar início do processamento do município no progresso
+    if progresso:
+        marcar_municipio_iniciado(progresso, uf, municipio, len(ies_lista), modalidade_atual)
 
     alvos_nome = ies_alvo_nome_norm or set()
     alvos_nome_sem_codigo = {_norm_label(_nome_sem_codigo_ies(n)) for n in alvos_nome}
@@ -470,9 +516,16 @@ def buscar_notas_por_municipio(
             ):
                 continue
 
-        if _norm_label(ies) in ies_ja_salvos:
+        # CORRIGIDO: Usar normalização sem código para comparação consistente
+        if _norm_ies_para_comparacao(ies) in ies_ja_salvos:
             print(f"⏭️ IES já presente no CSV, pulando: {ies}")
             continue
+        
+        # Verificar também no progresso JSON
+        if progresso and progresso.ies_ja_coletada(uf, municipio, ies, modalidade_atual):
+            print(f"⏭️ IES já no progresso, pulando: {ies}")
+            continue
+            
         print(f"🏫 IES ({idx+1}/{len(ies_lista)}): {ies}")
         ok_ies = False
         codigo_selecionado: Optional[str] = None
@@ -645,17 +698,39 @@ def buscar_notas_por_municipio(
             resultados.append(registro)
             if salvar_automatico:
                 salvar_incremental([registro])
-            ies_ja_salvos.add(_norm_label(ies_nome_registro))
+            # CORRIGIDO: Usar normalização sem código para consistência
+            ies_ja_salvos.add(_norm_ies_para_comparacao(ies_nome_registro))
+            
+            # Registrar IES no progresso JSON
+            if progresso:
+                deve_salvar = progresso.registrar_ies_coletada(
+                    uf=uf,
+                    municipio=municipio,
+                    ies_nome=ies_nome_registro,
+                    total_ies_municipio=len(ies_lista)
+                )
+                if deve_salvar:
+                    salvar_progresso_json(progresso, PROGRESS_FILE)
         else:
             print("⚠️ Nenhuma nota obtida após retentativas — seguindo para próxima IES")
 
         if idx < len(ies_lista) - 1:
-            if not abrir_nova_consulta(ctx):
-                print("⚠️ Não foi possível acionar 'Nova Consulta' para próxima IES")
+            # Após processar uma IES, sempre houve pesquisa (pesquisa_executada=True)
+            # Usa mudança inteligente para próxima IES
+            if not preparar_para_mudanca_estado(ctx, pesquisa_foi_executada=True):
+                print("⚠️ Não foi possível preparar para próxima IES")
                 break
             if not aplicar_filtros(ctx, estado=estado, municipio=municipio, curso="MEDICINA", modalidade=modalidade_atual):
-                print("⚠️ Não foi possível reconfigurar filtros após 'Nova Consulta'")
+                print("⚠️ Não foi possível reconfigurar filtros após preparação")
                 break
+    
+    # Verificar se completou o município
+    if progresso:
+        mun = progresso.obter_estado(uf).obter_municipio(municipio)
+        if mun.esta_completo():
+            print(f"✅ Município {municipio} completo!")
+            marcar_municipio_completo(progresso, uf, municipio)
+            salvar_progresso_json(progresso, PROGRESS_FILE)
 
     return resultados, pesquisa_executada
 
@@ -682,7 +757,8 @@ def carregar_progresso(caminho_csv: str) -> Tuple[List[Dict], Set[Tuple[str, str
         ies_nome = str(r.get("ies", "")).strip()
         if uf and mun and ies_nome:
             chave = (uf, mun)
-            ies_por_mun.setdefault(chave, set()).add(_norm_label(ies_nome))
+            # CORRIGIDO: Usar normalização sem código para consistência
+            ies_por_mun.setdefault(chave, set()).add(_norm_ies_para_comparacao(ies_nome))
 
     ja_processados = {
         (str(r.get("estado", "")).strip(), str(r.get("municipio", "")).strip())
@@ -759,8 +835,17 @@ def run_scraper(
     modalidade_atual = modalidade or str(FIES_MODALIDADE.value)
     print(f"📋 Modalidade FIES: {modalidade_atual.upper()}")
     
-    existentes, ja_processados, ultimo_par, ies_por_mun = carregar_progresso("notas_fies_medicina.csv")
+    # Carregar progresso do CSV (compatibilidade) e do arquivo JSON (novo)
+    existentes, ja_processados_csv, ultimo_par, ies_por_mun = carregar_progresso("notas_fies_medicina.csv")
     dados_finais: List[Dict] = list(existentes)
+    
+    # Carregar e sincronizar progresso JSON
+    progresso = carregar_progresso_json(PROGRESS_FILE)
+    progresso = sincronizar_com_csv(progresso, "notas_fies_medicina.csv", modalidade_atual)
+    progresso.modalidade_atual = modalidade_atual
+    
+    # Mostrar relatório de retomada
+    gerar_relatorio_retomada(progresso, modalidade_atual)
 
     modo_alvos = bool(alvos_review)
     ufs_alvo: Set[str] = set()
@@ -770,7 +855,7 @@ def run_scraper(
     if ultimo_par and not modo_alvos:
         count_ultimo = sum(1 for r in existentes if str(r.get("estado")) == ultimo_par[0] and str(r.get("municipio")) == ultimo_par[1])
         print(f"▶️ Retomando após: {ultimo_par[0]} - {ultimo_par[1]} (registros salvos: {count_ultimo})")
-    elif ja_processados and not modo_alvos:
+    elif ja_processados_csv and not modo_alvos:
         print("▶️ Registros existentes encontrados, iniciando do começo ignorando duplicados")
     elif modo_alvos:
         print(f"▶️ Modo alvo: {len(alvos_review or {})} município(s) com IES do CSV de falhas")
@@ -797,9 +882,10 @@ def run_scraper(
                 print("⏭️ Estado já percorrido — pulando")
                 continue
 
-        if not primeiro_estado and estado_teve_pesquisa:
-            if not abrir_nova_consulta(ctx):
-                print("⚠️ Não foi possível abrir 'Nova Consulta' para novo estado; avançando")
+        # Mudança de estado inteligente: só usa "Nova Consulta" se houve pesquisa prévia
+        if not primeiro_estado:
+            if not preparar_para_mudanca_estado(ctx, pesquisa_foi_executada=estado_teve_pesquisa):
+                print("⚠️ Não foi possível preparar para mudança de estado; avançando")
                 continue
         primeiro_estado = False
         estado_teve_pesquisa = False
@@ -825,30 +911,54 @@ def run_scraper(
                 print("⏭️ Município sem IES alvo — pulando")
                 continue
 
-            if (not modo_alvos) and (uf, municipio) in ja_processados and not (ultimo_par and uf == ultimo_par[0] and municipio == ultimo_par[1]):
-                print("⏭️ Já processado — pulando")
-                continue
+            # Verificação de completude usando novo sistema de progresso
+            if (not modo_alvos) and VALIDATE_COMPLETENESS:
+                if progresso.municipio_completo(uf, municipio, modalidade_atual):
+                    print("✅ Município 100% completo — pulando")
+                    continue
+            
+            # Fallback para verificação antiga (compatibilidade)
+            if (not modo_alvos) and (uf, municipio) in ja_processados_csv and not (ultimo_par and uf == ultimo_par[0] and municipio == ultimo_par[1]):
+                # Verificar se realmente está completo no novo sistema
+                if progresso.municipio_completo(uf, municipio, modalidade_atual):
+                    print("✅ Município 100% completo — pulando")
+                    continue
+                else:
+                    # Incompleto - processar apenas IES faltantes
+                    print("🔄 Município incompleto — retomando IES faltantes")
 
             if not aplicar_filtros(ctx, estado=estado, municipio=municipio, curso="MEDICINA", modalidade=modalidade_atual):
                 print("⚠️ Não foi possível aplicar filtros para o município; seguindo para o próximo")
                 continue
 
             try:
+                # Obter IES já coletadas do progresso JSON
+                ies_ja_coletadas = progresso.obter_ies_coletadas(uf, municipio)
+                ies_do_csv = ies_por_mun.get((uf, municipio), set())
+                # Combinar ambos os sets
+                ies_ja_salvos_combinado = ies_ja_coletadas | ies_do_csv
+                
                 res, pesquisou = buscar_notas_por_municipio(
                     ctx,
                     municipio,
                     estado,
                     uf,
-                    ies_ja_salvos=ies_por_mun.get((uf, municipio), set()),
+                    ies_ja_salvos=ies_ja_salvos_combinado,
                     ies_alvo_nome_norm=(alvos_review or {}).get((uf, municipio), (set(), set()))[0] if modo_alvos else None,
                     ies_alvo_codigo=(alvos_review or {}).get((uf, municipio), (set(), set()))[1] if modo_alvos else None,
                     modalidade=modalidade_atual,
+                    progresso=progresso,  # Passar progresso para registrar IES
                 )
                 if pesquisou:
                     estado_teve_pesquisa = True
                 for r in res:
                     dados_finais.append(r)
-                    ies_por_mun.setdefault((uf, municipio), set()).add(_norm_label(r.get("ies", "")))
+                    # CORRIGIDO: Usar normalização sem código para consistência
+                    ies_por_mun.setdefault((uf, municipio), set()).add(_norm_ies_para_comparacao(r.get("ies", "")))
+                
+                # Salvar checkpoint do progresso
+                salvar_progresso_json(progresso, PROGRESS_FILE)
+                
             except Exception:
                 pesquisou = False
 
@@ -858,12 +968,13 @@ def run_scraper(
             human_delay(ctx.fast_mode, 0.3, 0.7)
 
             if i < len(municipios) - 1:
-                if pesquisou:
-                    if not abrir_nova_consulta(ctx):
-                        print("⚠️ Não foi possível acionar 'Nova Consulta' para o próximo município; seguindo mesmo assim")
-                    else:
-                        if not aplicar_filtros(ctx, estado=estado, modalidade=modalidade_atual):
-                            print("⚠️ Não foi possível reaplicar estado após 'Nova Consulta'")
+                # Usa lógica inteligente: só usa "Nova Consulta" se houve pesquisa
+                if not preparar_para_mudanca_estado(ctx, pesquisa_foi_executada=pesquisou):
+                    print("⚠️ Não foi possível preparar para próximo município; seguindo mesmo assim")
+                elif pesquisou:
+                    # Se houve pesquisa e usamos Nova Consulta, reaplicar o estado
+                    if not aplicar_filtros(ctx, estado=estado, modalidade=modalidade_atual):
+                        print("⚠️ Não foi possível reaplicar estado após preparação")
                 # se não pesquisou (não havia Medicina), permanecemos e apenas seguimos para aplicar filtros no próximo loop
     print("\n✅ FINALIZADO")
 

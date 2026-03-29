@@ -24,246 +24,348 @@ def esperar_select2_habilitado(
     ctx: BrowserContext,
     container_id: str,
     timeout: Optional[int] = None,
-    max_attempts: int = MAX_RETRIES,
+    check_network: bool = False,
 ):
     """
-    Aguarda um Select2 ficar habilitado, com retry.
+    Aguarda um Select2 ficar habilitado (interagível).
+    
+    ATENÇÃO: Esta função espera APENAS que o elemento esteja presente e não-desabilitado.
+    NÃO verifica conteúdo interno ou opções.
+    
+    Args:
+        ctx: Contexto do navegador
+        container_id: ID do container Select2
+        timeout: Timeout customizado (usa config padrão se None)
+        check_network: Se True, monitora erros HTTP e faz retry automático
+    
+    Returns:
+        WebElement do container habilitado
+    
+    Raises:
+        TimeoutException: Se elemento não ficar habilitado dentro do timeout
     """
-    limite = timeout or (45 if ctx.fast_mode else 60)
+    from src.core import wait_interactable_only, execute_with_network_check
+    
+    # Otimizado: Reduzido de 45/60 para 5/10 segundos
+    limite = timeout or (5 if ctx.fast_mode else 10)
     driver = ctx.driver
-    logger = _get_logger()
 
-    def _habilitado(d):
-        el = d.find_element(By.ID, container_id)
+    def _esperar():
+        # Verifica se está habilitado (não-disabled)
+        element = driver.find_element(By.ID, container_id)
+        classe = element.get_attribute("class") or ""
+        aria_disabled = (element.get_attribute("aria-disabled") or "").lower()
+        
+        if "select2-container--disabled" in classe or aria_disabled == "true":
+            raise Exception(f"Select2 {container_id} está desabilitado")
+        
+        # Espera estar clicável
+        return wait_interactable_only(driver, (By.ID, container_id), timeout=limite)
+    
+    if check_network:
+        # Com monitoramento de rede
+        return execute_with_network_check(
+            ctx,
+            _esperar,
+            operation_name=f"esperar_select2_habilitado({container_id})",
+            max_retries=3,
+            retry_delay=2.0
+        )
+    else:
+        # Sem monitoramento de rede (comportamento padrão por compatibilidade)
+        return _esperar()
+
+
+def select2_interagivel(ctx: BrowserContext, container_id: str, timeout: Optional[int] = None) -> bool:
+    """
+    Verifica se um Select2 está pronto para interação (habilitado e clicável).
+    
+    Use esta função para verificar interatividade ANTES de tentar buscar opções.
+    Evita timeouts desnecessários quando o select está bloqueado/desabilitado.
+    
+    Args:
+        ctx: Contexto do navegador
+        container_id: ID do container Select2
+        timeout: Timeout em segundos (default: 3s fast, 5s normal)
+        
+    Returns:
+        True se interagível, False caso contrário (sem lançar exceção)
+    """
+    driver = ctx.driver
+    limite = timeout or (3 if ctx.fast_mode else 5)
+    
+    try:
+        # Verificar se existe e está habilitado
+        el = driver.find_element(By.ID, container_id)
         classe = el.get_attribute("class") or ""
         aria_disabled = (el.get_attribute("aria-disabled") or "").lower()
+        
         if "select2-container--disabled" in classe or aria_disabled == "true":
             return False
-        return el
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            result = WebDriverWait(
-                driver,
-                limite,
-                poll_frequency=0.3,
-                ignored_exceptions=(StaleElementReferenceException,),
-            ).until(_habilitado)
-            
-            if attempt > 1:
-                logger.log_success_after_retry(
-                    operation="esperar_select2_habilitado",
-                    attempt=attempt,
-                    total_time=attempt * RETRY_DELAY,
-                )
-            return result
-            
-        except TimeoutException as e:
-            logger.log_timeout(
-                operation="esperar_select2_habilitado",
-                attempt=attempt,
-                max_attempts=max_attempts,
-                exception=e,
-                context={"container_id": container_id},
-            )
-            if attempt >= max_attempts:
-                raise
-            time.sleep(RETRY_DELAY)
+        
+        # Verificar se está clicável
+        WebDriverWait(driver, limite, poll_frequency=0.1).until(
+            EC.element_to_be_clickable((By.ID, container_id))
+        )
+        return True
+        
+    except Exception:
+        return False
 
 
-def select2(ctx: BrowserContext, container_id: str, texto: str, max_attempts: int = MAX_RETRIES) -> None:
+def select2(ctx: BrowserContext, container_id: str, texto: str, check_network: bool = False) -> None:
     """
-    Seleciona opção em Select2 digitando texto, com retry em caso de erro.
-    """
-    driver, wait = ctx.driver, ctx.wait
-    logger = _get_logger()
+    Seleciona opção em Select2 digitando texto e pressionando ENTER.
     
-    for attempt in range(1, max_attempts + 1):
+    Args:
+        ctx: Contexto do navegador
+        container_id: ID do container Select2
+        texto: Texto a digitar (não precisa ser match exato)
+        check_network: Se True, monitora erros HTTP e faz retry automático
+    """
+    from src.core import wait_interactable_only, execute_with_network_check
+    
+    driver = ctx.driver
+    
+    def _selecionar():
+        # 1. Clica para abrir
+        container = wait_interactable_only(driver, (By.ID, container_id), timeout=5)
+        container.click()
+
+        # 2. Busca campo de pesquisa
+        time.sleep(0.1)  # Mínimo para dropdown renderizar
+        campo = wait_interactable_only(
+            driver, 
+            (By.XPATH, "//input[contains(@class,'select2-search__field')]"),
+            timeout=3
+        )
+
+        # 3. Limpa e digita
+        campo.send_keys(Keys.CONTROL + "a")
+        campo.send_keys(Keys.BACKSPACE)
+
+        if ctx.fast_mode:
+            campo.send_keys(texto)
+        else:
+            for letra in texto:
+                campo.send_keys(letra)
+                human_delay(ctx.fast_mode, 0.02, 0.02)
+
+        # 4. Aguarda e pressiona ENTER
+        human_delay(ctx.fast_mode, 0.04, 0.08 if ctx.fast_mode else 0.7)
+        campo.send_keys(Keys.ENTER)
+        
+        return True
+    
+    if check_network:
+        # Com monitoramento de rede e retry automático
+        return execute_with_network_check(
+            ctx,
+            _selecionar,
+            operation_name=f"select2({container_id}, {texto})",
+            max_retries=3,
+            retry_delay=2.0
+        )
+    else:
+        # Sem monitoramento de rede (comportamento padrão)
         try:
-            container = wait.until(EC.element_to_be_clickable((By.ID, container_id)))
-            container.click()
-
-            campo = wait.until(
-                EC.visibility_of_element_located(
-                    (By.XPATH, "//input[contains(@class,'select2-search__field')]")
-                )
-            )
-
-            campo.send_keys(Keys.CONTROL + "a")
-            campo.send_keys(Keys.BACKSPACE)
-
-            if ctx.fast_mode:
-                campo.send_keys(texto)
-            else:
-                for letra in texto:
-                    campo.send_keys(letra)
-                    human_delay(ctx.fast_mode, 0.02, 0.02)
-
-            if ctx.fast_mode:
-                human_delay(ctx.fast_mode, 0.04, 0.08)
-            else:
-                human_delay(ctx.fast_mode, 0.5, 0.7)
-            campo.send_keys(Keys.ENTER)
-            
-            if attempt > 1:
-                logger.log_success_after_retry(
-                    operation="select2",
-                    attempt=attempt,
-                    total_time=attempt * RETRY_DELAY,
-                )
-            return
-            
-        except (TimeoutException, StaleElementReferenceException) as e:
-            logger.log_timeout(
-                operation="select2",
-                attempt=attempt,
-                max_attempts=max_attempts,
-                exception=e,
-                context={"container_id": container_id, "texto": texto},
-            )
-            
-            # Fecha dropdown se aberto
+            return _selecionar()
+        except Exception:
+            # Tenta fechar dropdown se aberto
             try:
                 driver.find_element(By.TAG_NAME, "body").click()
-            except Exception:
+            except:
                 pass
-            
-            if attempt >= max_attempts:
-                raise
-            time.sleep(RETRY_DELAY)
+            raise
 
 
-def select2_exact(ctx: BrowserContext, container_id: str, texto: str, max_attempts: int = MAX_RETRIES) -> None:
+def select2_exact(ctx: BrowserContext, container_id: str, texto: str, check_network: bool = False) -> None:
     """
-    Seleciona opção exata em Select2, com retry e logging.
-    """
-    driver, wait = ctx.driver, ctx.wait
-    logger = _get_logger()
+    Seleciona opção exata em Select2 com busca e scroll automático.
     
-    esperar_select2_habilitado(ctx, container_id)
+    Args:
+        ctx: Contexto do navegador
+        container_id: ID do container Select2
+        texto: Texto exato a ser selecionado
+        check_network: Se True, monitora erros HTTP e faz retry automático
+    
+    Raises:
+        Exception: Se não encontrar opção após busca completa
+    """
+    from src.core import wait_interactable_only, execute_with_network_check
+    
+    driver = ctx.driver
+    
+    def _selecionar():
+        # 1. Espera select estar interagível
+        esperar_select2_habilitado(ctx, container_id, check_network=False)
+        
+        # 2. Clica para abrir
+        container = wait_interactable_only(driver, (By.ID, container_id), timeout=5)
+        container.click()
 
-    for tentativa in range(1, max_attempts + 1):
+        # 3. Busca campo de pesquisa
+        time.sleep(0.1)  # Mínimo para dropdown renderizar
+        campo = wait_interactable_only(
+            driver, 
+            (By.XPATH, "//input[contains(@class,'select2-search__field')]"),
+            timeout=3
+        )
+
+        # 4. Digita texto
+        campo.send_keys(Keys.CONTROL + "a")
+        campo.send_keys(Keys.BACKSPACE)
+        if ctx.fast_mode:
+            campo.send_keys(texto)
+        else:
+            for letra in texto:
+                campo.send_keys(letra)
+                human_delay(ctx.fast_mode, 0.04, 0.04)
+
+        human_delay(ctx.fast_mode, 0.04, 0.1 if ctx.fast_mode else 0.6)
+
+        # 5. Busca resultado sem wait longo
         try:
-            container = wait.until(EC.element_to_be_clickable((By.ID, container_id)))
-            container.click()
+            results = driver.find_element(By.CLASS_NAME, "select2-results__options")
+        except Exception:
+            raise Exception(f"Dropdown não abriu para {container_id}")
 
-            campo = wait.until(
-                EC.visibility_of_element_located(
-                    (By.XPATH, "//input[contains(@class,'select2-search__field')]")
-                )
-            )
-
-            campo.send_keys(Keys.CONTROL + "a")
-            campo.send_keys(Keys.BACKSPACE)
-            if ctx.fast_mode:
-                campo.send_keys(texto)
-            else:
-                for letra in texto:
-                    campo.send_keys(letra)
-                    human_delay(ctx.fast_mode, 0.04, 0.04)
-
-            human_delay(ctx.fast_mode, 0.04, 0.1 if ctx.fast_mode else 0.6)
-
-            results = wait.until(
-                EC.presence_of_element_located(
-                    (By.CLASS_NAME, "select2-results__options")
-                )
-            )
-
-            match = None
-            last_count = -1
-            while True:
-                itens = results.find_elements(By.CLASS_NAME, "select2-results__option")
-                for item in itens:
-                    txt = item.text.strip()
-                    if txt and txt.upper() == texto.upper():
-                        match = item
-                        break
-                if match:
+        # 6. Procura match fazendo scroll
+        match = None
+        last_count = -1
+        max_scrolls = 20  # Limite de segurança
+        scroll_count = 0
+        
+        while scroll_count < max_scrolls:
+            itens = results.find_elements(By.CLASS_NAME, "select2-results__option")
+            for item in itens:
+                txt = item.text.strip()
+                if txt and txt.upper() == texto.upper():
+                    match = item
                     break
-                if len(itens) == last_count:
-                    break
-                last_count = len(itens)
-                driver.execute_script(
-                    "arguments[0].scrollTop = arguments[0].scrollHeight", results
-                )
-                if ctx.fast_mode:
-                    human_delay(ctx.fast_mode, 0.03, 0.08)
-                else:
-                    human_delay(ctx.fast_mode, 0.4, 0.5)
-
             if match:
-                match.click()
-                human_delay(ctx.fast_mode, 0.2, 0.5 if ctx.fast_mode else 0.8)
-                if tentativa > 1:
-                    logger.log_success_after_retry(
-                        operation="select2_exact",
-                        attempt=tentativa,
-                        total_time=tentativa * RETRY_DELAY,
-                    )
-            else:
-                driver.find_element(By.TAG_NAME, "body").click()
-                raise TimeoutException(f"Opção exata não encontrada para: {texto}")
+                break
+            if len(itens) == last_count:  # Não há mais itens
+                break
+            last_count = len(itens)
+            
+            # Scroll down
+            driver.execute_script(
+                "arguments[0].scrollTop = arguments[0].scrollHeight", results
+            )
+            human_delay(ctx.fast_mode, 0.03, 0.08 if ctx.fast_mode else 0.5)
+            scroll_count += 1
 
-            driver.find_element(By.TAG_NAME, "body").click()
-            return
-            
-        except StaleElementReferenceException as e:
-            logger.log_timeout(
-                operation="select2_exact",
-                attempt=tentativa,
-                max_attempts=max_attempts,
-                exception=e,
-                context={"container_id": container_id, "texto": texto},
-            )
-            if tentativa >= max_attempts:
-                raise
-            human_delay(ctx.fast_mode, 0.08, 0.16)
-            continue
-            
-        except TimeoutException as e:
-            logger.log_timeout(
-                operation="select2_exact",
-                attempt=tentativa,
-                max_attempts=max_attempts,
-                exception=e,
-                context={"container_id": container_id, "texto": texto},
-            )
-            if tentativa >= max_attempts:
-                raise
-            time.sleep(RETRY_DELAY)
+        if not match:
+            # Fecha dropdown
+            try:
+                driver.find_element(By.TAG_NAME, "body").click()
+            except:
+                pass
+            raise Exception(f"Opção '{texto}' não encontrada em {container_id}")
+
+        # 7. Clica no match
+        match.click()
+        human_delay(ctx.fast_mode, 0.2, 0.5 if ctx.fast_mode else 0.8)
+        
+        return True
+    
+    if check_network:
+        # Com monitoramento de rede e retry automático
+        return execute_with_network_check(
+            ctx,
+            _selecionar,
+            operation_name=f"select2_exact({container_id}, {texto})",
+            max_retries=3,
+            retry_delay=2.0
+        )
+    else:
+        # Sem monitoramento de rede (comportamento padrão)
+        return _selecionar()
 
 
 def curso_existe(ctx: BrowserContext, nome_curso: str) -> bool:
-    driver, wait = ctx.driver, ctx.wait
+    """
+    Verifica se um curso existe no select de cursos.
+    
+    REGRAS:
+    ✅ Timeout APENAS para verificar interatividade do select (clicável)
+    ❌ ZERO waits para buscar opções internas
+    ✅ Ausência de opção = retorna False (fluxo normal, sem exceção)
+    
+    Args:
+        ctx: Contexto do navegador
+        nome_curso: Nome do curso a buscar (ex: "MEDICINA")
+        
+    Returns:
+        True se o curso existe, False caso contrário
+    """
+    driver = ctx.driver
+    container_id = "select2-noCursosPublico-container"
+    
+    # ═══════════════════════════════════════════════════════════════════════
+    # FASE 1: ESPERA - Verificar se o select está INTERAGÍVEL
+    # ═══════════════════════════════════════════════════════════════════════
+    # ÚNICO local onde usamos timeout/wait
     try:
-        container = wait.until(
-            EC.element_to_be_clickable((By.ID, "select2-noCursosPublico-container"))
+        # Verificar se está habilitado (não desabilitado)
+        esperar_select2_habilitado(ctx, container_id, timeout=5)
+        
+        # Verificar se está clicável
+        container = WebDriverWait(driver, 3 if ctx.fast_mode else 5).until(
+            EC.element_to_be_clickable((By.ID, container_id))
         )
-        container.click()
-
-        campo = wait.until(
-            EC.visibility_of_element_located(
-                (By.XPATH, "//input[contains(@class,'select2-search__field')]")
-            )
-        )
-
-        campo.send_keys(nome_curso)
-        human_delay(ctx.fast_mode, 0.1, 0.2)
-
-        WebDriverWait(driver, 3 if ctx.fast_mode else 5).until(
-            EC.presence_of_element_located(
-                (By.CLASS_NAME, "select2-results__option")
-            )
-        )
-
-        opcoes = driver.find_elements(By.CLASS_NAME, "select2-results__option")
-        existe = any(nome_curso.upper() in o.text.upper() for o in opcoes)
-
-        driver.find_element(By.TAG_NAME, "body").click()
-        return existe
     except TimeoutException:
+        # Select não interagível = problema real (requisição anterior pode ter falhado)
+        print(f"⚠️ Select de cursos não está interagível (desabilitado ou bloqueado)")
+        return False
+    
+    # ═══════════════════════════════════════════════════════════════════════
+    # FASE 2: SEM ESPERA - Abrir dropdown e verificar opções instantaneamente
+    # ═══════════════════════════════════════════════════════════════════════
+    try:
+        # Abrir o dropdown
+        container.click()
+        
+        # Pequena pausa para o dropdown renderizar (NÃO é wait, é sleep fixo mínimo)
+        time.sleep(0.15)
+        
+        # Buscar campo de busca IMEDIATAMENTE (sem wait)
+        try:
+            campo = driver.find_element(
+                By.XPATH, "//input[contains(@class,'select2-search__field')]"
+            )
+        except Exception:
+            # Se não encontrou campo de busca, tentar fechar e retornar False
+            try:
+                driver.find_element(By.TAG_NAME, "body").click()
+            except:
+                pass
+            return False
+        
+        # Digitar nome do curso para filtrar
+        campo.send_keys(nome_curso)
+        
+        # Pequena pausa para o filtro processar (NÃO é wait, é sleep fixo mínimo)
+        time.sleep(0.15)
+        
+        # Buscar opções IMEDIATAMENTE (sem wait)
+        opcoes = driver.find_elements(By.CLASS_NAME, "select2-results__option")
+        
+        # Verificar se alguma opção contém o curso buscado
+        existe = any(nome_curso.upper() in o.text.upper() for o in opcoes if o.text.strip())
+        
+        # Fechar dropdown
         driver.find_element(By.TAG_NAME, "body").click()
+        
+        return existe
+        
+    except Exception:
+        # Qualquer erro na busca = assumir que não existe (sem propagar exceção)
+        try:
+            driver.find_element(By.TAG_NAME, "body").click()
+        except:
+            pass
         return False
 
 
@@ -295,7 +397,8 @@ def listar_opcoes_select2(ctx: BrowserContext, container_id: str) -> List[str]:
         driver.execute_script(
             "arguments[0].scrollTop = arguments[0].scrollHeight", results
         )
-        human_delay(ctx.fast_mode, 0.8, 0.8)
+        # Otimizado: Reduzido de 0.8s para 0.05-0.1s
+        human_delay(ctx.fast_mode, 0.05, 0.1)
 
     driver.find_element(By.TAG_NAME, "body").click()
     return sorted(opcoes)

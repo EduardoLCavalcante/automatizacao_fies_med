@@ -5,11 +5,16 @@ from typing import Optional
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 
 from src.core import BrowserContext, human_delay, remove_loading_overlay
 from src.core.timeout_log import get_logger
-from src.config import BASE_URL, MAX_RETRIES, RETRY_DELAY, USE_EXPONENTIAL_BACKOFF, MAX_RETRY_DELAY, FIES_MODALIDADE
+from src.config import (
+    BASE_URL, MAX_RETRIES, RETRY_DELAY, USE_EXPONENTIAL_BACKOFF, MAX_RETRY_DELAY, 
+    FIES_MODALIDADE, ENABLE_INTELLIGENT_STATE_CHANGE, STATE_CHANGE_TIMEOUT, 
+    FALLBACK_TO_DIRECT_SELECT
+)
 from src.actions import (
     select2,
     select2_exact,
@@ -51,18 +56,19 @@ def preparar_primeira_pagina(ctx: BrowserContext, max_attempts: int = MAX_RETRIE
             print("⚠️ Resolva o CAPTCHA e pressione ENTER para continuar...")
             input()
             
+            # Verificação rápida sem timeout longo - elemento já deve estar pronto
             try:
-                wait.until(EC.presence_of_element_located((By.ID, "select2-noEstado-container")))
-                if attempt > 1:
-                    logger.log_success_after_retry(
-                        operation="preparar_primeira_pagina",
-                        attempt=attempt,
-                        total_time=attempt * RETRY_DELAY,
-                    )
-                return True
-            except TimeoutException:
-                # Página carregou mas elemento não apareceu, ainda pode funcionar
-                return True
+                driver.find_element(By.ID, "select2-noEstado-container")
+            except Exception:
+                pass  # Continua mesmo se não encontrar
+            
+            if attempt > 1:
+                logger.log_success_after_retry(
+                    operation="preparar_primeira_pagina",
+                    attempt=attempt,
+                    total_time=attempt * RETRY_DELAY,
+                )
+            return True
                 
         except Exception as e:
             logger.log_timeout(
@@ -97,19 +103,16 @@ def abrir_nova_consulta(ctx: BrowserContext, max_attempts: int = MAX_RETRIES) ->
             link.click()
             
             remove_loading_overlay(ctx)
-            try:
-                wait.until(EC.presence_of_element_located((By.ID, "select2-noEstado-container")))
-            except TimeoutException:
-                pass
-
+            
+            # Verificação rápida sem timeout - elemento pode ou não estar presente
+            time.sleep(0.3)  # Pausa mínima para página carregar
+            
             print("⚠️ Resolva o CAPTCHA e pressione ENTER para continuar...")
             input()
             remove_loading_overlay(ctx)
             
-            try:
-                wait.until(EC.presence_of_element_located((By.ID, "select2-noEstado-container")))
-            except TimeoutException:
-                pass
+            # Verificação rápida sem timeout
+            time.sleep(0.2)
             
             if attempt > 1:
                 logger.log_success_after_retry(
@@ -172,84 +175,30 @@ def aplicar_filtros(
     if not selecionar_radio_fies(ctx, modalidade_efetiva):
         print(f"⚠️ Não foi possível selecionar modalidade FIES: {modalidade_efetiva}")
         return False
-    
-    human_delay(ctx.fast_mode, 0.1, 0.3)
 
-    # Selecionar Estado com retry
-    for attempt in range(1, max_attempts + 1):
-        try:
-            select2(ctx, "select2-noEstado-container", estado)
-            human_delay(ctx.fast_mode, 0.2, 0.5)
-            if attempt > 1:
-                logger.log_success_after_retry(
-                    operation="aplicar_filtros_estado",
-                    attempt=attempt,
-                    total_time=attempt * RETRY_DELAY,
-                )
-            break
-        except Exception as e:
-            logger.log_timeout(
-                operation="aplicar_filtros_estado",
-                attempt=attempt,
-                max_attempts=max_attempts,
-                exception=e,
-                context={"estado": estado},
-            )
-            if attempt >= max_attempts:
-                return False
-            time.sleep(_calculate_delay(attempt, RETRY_DELAY))
+    # Selecionar Estado (com network check)
+    try:
+        select2(ctx, "select2-noEstado-container", estado, check_network=True)
+    except Exception as e:
+        print(f"⚠️ Erro ao selecionar estado {estado}: {e}")
+        return False
 
     if municipio:
-        # Selecionar Município com retry
-        for attempt in range(1, max_attempts + 1):
-            try:
-                select2(ctx, "select2-noMunicipio-container", municipio)
-                human_delay(ctx.fast_mode, 0.2, 0.5)
-                if attempt > 1:
-                    logger.log_success_after_retry(
-                        operation="aplicar_filtros_municipio",
-                        attempt=attempt,
-                        total_time=attempt * RETRY_DELAY,
-                    )
-                break
-            except Exception as e:
-                logger.log_timeout(
-                    operation="aplicar_filtros_municipio",
-                    attempt=attempt,
-                    max_attempts=max_attempts,
-                    exception=e,
-                    context={"estado": estado, "municipio": municipio},
-                )
-                if attempt >= max_attempts:
-                    return False
-                time.sleep(_calculate_delay(attempt, RETRY_DELAY))
+        # Selecionar Município (com network check)
+        try:
+            select2(ctx, "select2-noMunicipio-container", municipio, check_network=True)
+        except Exception as e:
+            print(f"⚠️ Erro ao selecionar município {municipio}: {e}")
+            return False
         
         if curso:
-            # Selecionar Curso com retry
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    esperar_select2_habilitado(ctx, "select2-noCursosPublico-container")
-                    select2_exact(ctx, "select2-noCursosPublico-container", curso)
-                    human_delay(ctx.fast_mode, 0.2, 0.5)
-                    if attempt > 1:
-                        logger.log_success_after_retry(
-                            operation="aplicar_filtros_curso",
-                            attempt=attempt,
-                            total_time=attempt * RETRY_DELAY,
-                        )
-                    break
-                except TimeoutException as e:
-                    logger.log_timeout(
-                        operation="aplicar_filtros_curso",
-                        attempt=attempt,
-                        max_attempts=max_attempts,
-                        exception=e,
-                        context={"estado": estado, "municipio": municipio, "curso": curso},
-                    )
-                    if attempt >= max_attempts:
-                        print(f"⚠️ Não foi possível selecionar {curso} após {max_attempts} tentativas")
-                        return False
-                    time.sleep(_calculate_delay(attempt, RETRY_DELAY))
+            # Selecionar Curso (com network check)
+            try:
+                esperar_select2_habilitado(ctx, "select2-noCursosPublico-container", check_network=True)
+                select2_exact(ctx, "select2-noCursosPublico-container", curso, check_network=True)
+            except Exception as e:
+                print(f"⚠️ Erro ao selecionar curso {curso}: {e}")
+                return False
     
     return True
 
@@ -272,3 +221,143 @@ def reiniciar_navegacao(ctx: BrowserContext) -> bool:
         return True
     
     return False
+
+
+def nova_consulta_disponivel(ctx: BrowserContext, timeout: Optional[float] = None) -> bool:
+    """
+    Verifica se o botão "Nova Consulta" está disponível na página.
+    
+    Usa um timeout curto para evitar esperas longas quando o botão não existe.
+    
+    Args:
+        ctx: Contexto do browser
+        timeout: Tempo máximo de espera (usa STATE_CHANGE_TIMEOUT se não especificado)
+    
+    Returns:
+        True se o botão está disponível e clicável, False caso contrário
+    """
+    driver = ctx.driver
+    timeout_efetivo = timeout if timeout is not None else STATE_CHANGE_TIMEOUT
+    
+    try:
+        # Tenta localizar o link "Nova Consulta" com timeout curto
+        WebDriverWait(driver, timeout_efetivo).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "a[href='/consulta']"))
+        )
+        return True
+    except TimeoutException:
+        return False
+    except Exception:
+        return False
+
+
+def preparar_para_mudanca_estado(
+    ctx: BrowserContext,
+    pesquisa_foi_executada: bool,
+    max_attempts: int = MAX_RETRIES,
+) -> bool:
+    """
+    Prepara a página para mudança de estado de forma inteligente.
+    
+    Decide automaticamente qual estratégia usar:
+    - Se pesquisa foi executada E botão "Nova Consulta" existe: usa "Nova Consulta"
+    - Se não houve pesquisa OU botão não existe: prepara para mudança direta no select
+    
+    Args:
+        ctx: Contexto do browser
+        pesquisa_foi_executada: Flag indicando se uma pesquisa foi feita
+        max_attempts: Número máximo de tentativas para operações
+    
+    Returns:
+        True se a página está pronta para mudança de estado, False caso contrário
+    """
+    logger = get_logger()
+    
+    if not ENABLE_INTELLIGENT_STATE_CHANGE:
+        # Comportamento legado: sempre tenta "Nova Consulta"
+        if pesquisa_foi_executada:
+            return abrir_nova_consulta(ctx, max_attempts)
+        return True
+    
+    # Fluxo inteligente
+    if pesquisa_foi_executada:
+        # Verificar se "Nova Consulta" está disponível
+        if nova_consulta_disponivel(ctx):
+            print("🔄 Usando 'Nova Consulta' para preparar mudança de estado...")
+            return abrir_nova_consulta(ctx, max_attempts)
+        else:
+            # Pesquisa foi executada mas botão não existe (cenário inesperado)
+            print("⚠️ Botão 'Nova Consulta' não encontrado após pesquisa - preparando para mudança direta")
+            if FALLBACK_TO_DIRECT_SELECT:
+                return _preparar_mudanca_direta(ctx)
+            return False
+    else:
+        # Sem pesquisa prévia: mudança direta é o caminho correto
+        print("➡️ Sem pesquisa prévia - mudança de estado será feita diretamente no select")
+        return _preparar_mudanca_direta(ctx)
+
+
+def _preparar_mudanca_direta(ctx: BrowserContext) -> bool:
+    """
+    Prepara a página para mudança direta no select (sem "Nova Consulta").
+    
+    Garante que overlays de loading estejam removidos e que o select
+    de estado esteja acessível.
+    
+    Returns:
+        True se pronto para mudança direta, False caso contrário
+    """
+    try:
+        remove_loading_overlay(ctx)
+        
+        # Verificação rápida sem timeout longo
+        try:
+            ctx.driver.find_element(By.ID, "select2-noEstado-container")
+            return True
+        except Exception:
+            # Select não encontrado, tentar refresh como último recurso
+            print("⚠️ Select de estado não encontrado - tentando refresh...")
+            return reiniciar_navegacao(ctx)
+    except Exception as e:
+        print(f"⚠️ Erro ao preparar mudança direta: {e}")
+        return False
+
+
+def trocar_estado_inteligente(
+    ctx: BrowserContext,
+    novo_estado: str,
+    pesquisa_foi_executada: bool,
+    modalidade: Optional[str] = None,
+    max_attempts: int = MAX_RETRIES,
+) -> bool:
+    """
+    Função principal para mudança de estado inteligente.
+    
+    Gerencia todo o fluxo de mudança de estado:
+    1. Prepara a página (com ou sem "Nova Consulta" baseado no contexto)
+    2. Aplica o novo estado
+    
+    Args:
+        ctx: Contexto do browser
+        novo_estado: Nome do novo estado (UF)
+        pesquisa_foi_executada: Flag indicando se uma pesquisa foi feita no estado anterior
+        modalidade: Modalidade FIES (opcional, usa padrão se não especificada)
+        max_attempts: Número máximo de tentativas
+    
+    Returns:
+        True se a mudança foi bem sucedida, False caso contrário
+    """
+    logger = get_logger()
+    
+    # Passo 1: Preparar página para mudança
+    if not preparar_para_mudanca_estado(ctx, pesquisa_foi_executada, max_attempts):
+        # Tentar estratégia de fallback: refresh e começar do zero
+        print("🔄 Tentando recuperação via refresh...")
+        if reiniciar_navegacao(ctx):
+            print("✅ Navegação reiniciada com sucesso")
+        else:
+            print("❌ Não foi possível preparar para mudança de estado")
+            return False
+    
+    # Passo 2: Aplicar novo estado
+    return aplicar_filtros(ctx, estado=novo_estado, modalidade=modalidade, max_attempts=max_attempts)

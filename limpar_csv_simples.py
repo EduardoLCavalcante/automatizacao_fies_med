@@ -29,6 +29,7 @@ def limpar_csv_atual():
         line_limpa = line_limpa.replace('Ver detalhes', '')
         line_limpa = line_limpa.replace('ver detalhes', '')
         line_limpa = line_limpa.replace('Ver Detalhes', '')
+        line_limpa = line_limpa.replace('  Ver Detalhes', '')
         line_limpa = line_limpa.replace('\n', ' ')
         line_limpa = line_limpa.replace('\r', ' ')
         
