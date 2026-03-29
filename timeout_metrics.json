@@ -1,0 +1,14 @@
+{
+  "total_timeouts": 3,
+  "total_retries": 0,
+  "successful_retries": 0,
+  "final_failures": 0,
+  "success_rate_after_retry": 0,
+  "timeouts_by_operation": {
+    "select2_exact": 3
+  },
+  "timeouts_by_state": {
+    "Acre": 3
+  },
+  "avg_retry_time_seconds": 0.0
+}

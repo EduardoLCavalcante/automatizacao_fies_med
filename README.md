@@ -38,6 +38,33 @@ pip install -r requirements.txt
 ```bash
 python main.py
 ```
+
+### Modalidades FIES
+
+O sistema suporta duas modalidades de FIES:
+
+| Modalidade | Descrição | Radio Button |
+|------------|-----------|--------------|
+| **social** | FIES Social (inscritos no CadÚnico) | `stCadunicoS` |
+| **regular** | FIES padrão | `stCadunicoN` |
+
+Para selecionar a modalidade via linha de comando:
+
+```bash
+# Coleta apenas FIES Social (padrão)
+python main.py --modalidade social
+
+# Coleta apenas FIES Regular
+python main.py --modalidade regular
+
+# Coleta ambas modalidades (executa duas passadas)
+python main.py --modalidade ambos
+```
+
+A coluna `modalidade_fies` é automaticamente adicionada ao CSV para identificar de qual modalidade veio cada registro.
+
+**Nota:** Se `--modalidade` não for especificado, usa o valor padrão definido em `FIES_MODALIDADE` no arquivo `settings.py` (padrão: `social`).
+
 Durante a execução:
 - Uma janela do Chrome será aberta em [main.py](main.py) e o site do FIES será carregado.
 - Quando o CAPTCHA aparecer, o terminal mostrará a mensagem "Resolva o CAPTCHA e pressione ENTER". Resolva-o no navegador e pressione ENTER no terminal para continuar.
@@ -52,6 +79,7 @@ Colunas:
 - **municipio:** Nome do município consultado
 - **curso:** "MEDICINA"
 - **ies:** Instituição de Ensino Superior
+- **modalidade_fies:** Modalidade FIES ("social" ou "regular")
 - **conceito_curso:** Conceito listado após seleção da IES
 - **nota_ultimo_aprovado:** Nota (texto numérico) da última linha após expandir a listagem
 - **nota_enem_ultimo_ampla:** NOTA ENEM do último candidato na categoria Ampla
@@ -65,6 +93,61 @@ Observações:
 ## Configurações Úteis
 No início de [main.py](main.py):
 - **`FAST_MODE`**: acelera interações e reduz esperas. Útil para evitar expiração de sessão; se notar instabilidade, defina como `False`.
+
+### Configurações de Retry/Timeout
+
+As seguintes configurações podem ser ajustadas em [src/config/settings.py](src/config/settings.py):
+
+| Configuração | Padrão | Descrição |
+|-------------|--------|-----------|
+| `MAX_RETRIES` | 3 | Número máximo de tentativas para operações que falham |
+| `RETRY_DELAY` | 2.0 | Delay base entre tentativas (segundos) |
+| `MAX_RETRY_DELAY` | 30.0 | Delay máximo entre tentativas |
+| `USE_EXPONENTIAL_BACKOFF` | True | Usar backoff exponencial (dobra delay a cada retry) |
+| `TIMEOUT_LOGGING_ENABLED` | True | Habilita logging de timeouts |
+| `TIMEOUT_LOG_FILE` | timeout_log.jsonl | Arquivo de log detalhado de timeouts |
+| `TIMEOUT_METRICS_FILE` | timeout_metrics.json | Arquivo com métricas agregadas |
+| `FAILED_ITEMS_FILE` | failed_items.json | Lista de itens que falharam para reprocessamento |
+
+## Tratamento de Timeouts
+
+O sistema possui tratamento robusto de timeouts com as seguintes características:
+
+### Retry Automático
+- Todas as operações críticas (seleção de filtros, navegação, extração de dados) possuem retry automático
+- Usa backoff exponencial por padrão (2s → 4s → 8s) para evitar sobrecarga
+- Após falha final, registra item para reprocessamento posterior
+
+### Logs de Timeout
+Ao final da execução, são gerados:
+- **timeout_log.jsonl**: Log detalhado de cada timeout (timestamp, operação, tentativa, erro)
+- **timeout_metrics.json**: Métricas agregadas (total de timeouts, taxa de sucesso de retry, timeouts por operação/estado)
+- **failed_items.json**: Lista de itens que falharam completamente para reprocessamento
+
+### Interpretando os Logs
+
+```bash
+# Ver resumo de métricas
+cat timeout_metrics.json | python -m json.tool
+
+# Contar timeouts por operação
+cat timeout_log.jsonl | jq -s 'group_by(.operation) | map({operation: .[0].operation, count: length})'
+
+# Listar estados com mais problemas
+cat timeout_metrics.json | python -c "import json,sys; d=json.load(sys.stdin); print(d['timeouts_by_state'])"
+```
+
+### Reprocessando Itens Falhados
+Itens que falharam após todas as tentativas são salvos em `failed_items.json`. Para reprocessá-los:
+
+```python
+# Em uma sessão Python interativa ou script
+from src.core.timeout_log import TimeoutLogger
+logger = TimeoutLogger.get_instance()
+failed = logger.load_failed_items()
+for item in failed:
+    print(f"{item.estado}/{item.municipio}: {item.last_error}")
+```
 
 ## Dicas de Uso
 - Mantenha o Chrome visível para conseguir interagir com CAPTCHAs quando solicitado.
@@ -97,6 +180,20 @@ ESTADOS = {
 - **CAPTCHA constante:** O site pode impor verificações; responda quando solicitado. Se ocorrer com muita frequência, tente executar em horários diferentes ou reduzir o ritmo (desative `FAST_MODE`).
 - **Mudanças no site:** Seletores podem quebrar se o layout mudar. Ajuste os seletores no código conforme necessário.
 - **Permissões/antivírus:** Alguns antivírus bloqueiam automação de navegador; permita a execução do Python/ChromeDriver.
+
+### Troubleshooting de Timeouts
+
+| Sintoma | Possível Causa | Solução |
+|---------|----------------|---------|
+| Muitos timeouts no início | Conexão lenta ou site sobrecarregado | Aumente `RETRY_DELAY` para 5s ou mais |
+| Timeouts em um estado específico | Muitos municípios/IES nesse estado | Normal; o retry automático deve resolver |
+| Taxa de sucesso de retry baixa (<50%) | Site pode estar bloqueando | Desative `FAST_MODE`, aumente delays |
+| Todos os retries falham | Possível mudança no site ou bloqueio | Verifique se o site está acessível manualmente |
+
+**Dica:** Se timeouts são frequentes, considere:
+1. Desativar `FAST_MODE` em `settings.py`
+2. Aumentar `MAX_RETRIES` para 5
+3. Executar em horários de menor tráfego (madrugada)
 
 ## Avisos
 - Respeite os termos de uso do site do FIES e boas práticas de scraping.

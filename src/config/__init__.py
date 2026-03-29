@@ -1,4 +1,19 @@
-from .settings import FAST_MODE, CONCEITO_ALVO, BASE_URL, CSV_COLUMNS
+from .settings import (
+    FAST_MODE,
+    CONCEITO_ALVO,
+    BASE_URL,
+    CSV_COLUMNS,
+    MAX_RETRIES,
+    RETRY_DELAY,
+    MAX_RETRY_DELAY,
+    USE_EXPONENTIAL_BACKOFF,
+    TIMEOUT_LOG_FILE,
+    TIMEOUT_METRICS_FILE,
+    FAILED_ITEMS_FILE,
+    TIMEOUT_LOGGING_ENABLED,
+    FIES_MODALIDADE,
+    FiesModalidade,
+)
 from .estados import ESTADOS
 
 __all__ = [
@@ -7,4 +22,14 @@ __all__ = [
     "BASE_URL",
     "CSV_COLUMNS",
     "ESTADOS",
+    "MAX_RETRIES",
+    "RETRY_DELAY",
+    "MAX_RETRY_DELAY",
+    "USE_EXPONENTIAL_BACKOFF",
+    "TIMEOUT_LOG_FILE",
+    "TIMEOUT_METRICS_FILE",
+    "FAILED_ITEMS_FILE",
+    "TIMEOUT_LOGGING_ENABLED",
+    "FIES_MODALIDADE",
+    "FiesModalidade",
 ]

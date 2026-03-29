@@ -2,11 +2,12 @@
 
 import os
 import re
+import time
 from typing import Dict, List, Optional, Set, Tuple
 import unicodedata
 
 import pandas as pd
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -22,9 +23,9 @@ from src.actions import (
     select2_pick_first,
     esperar_select2_habilitado,
 )
-from src.config import CSV_COLUMNS, ESTADOS
-from src.core import BrowserContext, human_delay, normalizar_decimal_pt
-from src.navigation import abrir_nova_consulta, aplicar_filtros, preparar_primeira_pagina
+from src.config import CSV_COLUMNS, ESTADOS, MAX_RETRIES, RETRY_DELAY, FIES_MODALIDADE, FiesModalidade
+from src.core import BrowserContext, human_delay, normalizar_decimal_pt, get_logger
+from src.navigation import abrir_nova_consulta, aplicar_filtros, preparar_primeira_pagina, reiniciar_navegacao
 from src.scraping.extract import extrair_nota_enem_de_linha
 from src.scraping.table import (
     expandir_todos_candidatos,
@@ -34,6 +35,30 @@ from src.scraping.table import (
 
 
 _IES_CODIGO_RE = re.compile(r"\((\d{4,})\)\s*$")
+
+
+def _registrar_item_falhado(
+    estado: str,
+    municipio: str,
+    ies: Optional[str] = None,
+    operation: str = "",
+    error: str = "",
+    can_retry: bool = True,
+) -> None:
+    """Registra um item que falhou para reprocessamento posterior."""
+    try:
+        logger = get_logger()
+        logger.add_failed_item(
+            estado=estado,
+            municipio=municipio,
+            ies=ies,
+            operation=operation,
+            total_attempts=MAX_RETRIES,
+            last_error=error,
+            can_retry=can_retry,
+        )
+    except Exception:
+        pass
 
 
 def _filtrar_celulas_concorrencia(cells):
@@ -89,21 +114,39 @@ def _ies_selecionado(ctx: BrowserContext, container_id: str, esperado: str) -> b
 
 
 def _limpar_marcas_concorrencia(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove resíduos de 'TIPOS DE CONCORRÊNCIA' gravados em conceito_curso."""
+    """Remove resíduos de 'TIPOS DE CONCORRÊNCIA' e textos indesejados em conceito_curso."""
 
     if "conceito_curso" not in df.columns:
         return df
 
     try:
         serie = df["conceito_curso"].astype("string")
-        serie = serie.str.replace("TIPOS DE CONCORRÊNCIA", "", case=False, regex=False)
+        
+        # Remove textos indesejados
+        textos_remover = [
+            "TIPOS DE CONCORRÊNCIA",
+            "Ver detalhes", 
+            "ver detalhes",
+            "VER DETALHES",
+            "Detalhes",
+            "detalhes",
+        ]
+        
+        for texto in textos_remover:
+            serie = serie.str.replace(texto, "", case=False, regex=False)
+        
+        # Remove quebras de linha e espaços extras
         serie = serie.str.replace("\n", " ", regex=False).str.replace("\r", " ", regex=False)
+        serie = serie.str.replace(r'\s+', ' ', regex=True)  # Múltiplos espaços → um espaço
         serie = serie.str.strip()
+        
+        # Remove valores vazios ou que são apenas categorias
         serie = serie.where(serie.str.len() > 0, None)
         serie = serie.where(~serie.str.lower().isin({"ampla", "ppiq", "pcd"}), None)
+        
         df["conceito_curso"] = serie
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ Erro na limpeza de conceitos: {e}")
 
     return df
 
@@ -114,11 +157,13 @@ def salvar_incremental(rows: List[Dict], caminho: str = "notas_fies_medicina.csv
 
     modo = "a" if os.path.exists(caminho) and os.path.getsize(caminho) > 0 else "w"
     df = pd.DataFrame(rows)
+    df = _limpar_marcas_concorrencia(df)  # Limpar textos indesejados
     df.to_csv(caminho, mode=modo, header=(modo == "w"), index=False, encoding="utf-8-sig")
 
 
 def salvar_csv_completo(registros: List[Dict], caminho: str = "notas_fies_medicina.csv") -> None:
     df = pd.DataFrame(registros)
+    df = _limpar_marcas_concorrencia(df)  # Limpar textos indesejados
     df.to_csv(caminho, index=False, encoding="utf-8-sig")
 
 
@@ -253,14 +298,33 @@ def _coletar_notas_ies_review(
     municipio: str,
     curso: str,
     ies_nome: str,
+    modalidade_fies: Optional[str] = None,
 ) -> Optional[Dict]:
     """Coleta conceito e notas da IES atualmente selecionada."""
+    from src.config import FIES_MODALIDADE
+    
+    # Determinar modalidade (usa passada ou padrão do settings)
+    modalidade = modalidade_fies or str(FIES_MODALIDADE.value)
 
     conceito_valor: Optional[str] = None
     try:
         if select2_pick_first(ctx, "select2-conceitoCurso-container"):
             elc = ctx.driver.find_element(By.ID, "select2-conceitoCurso-container")
-            conceito_valor = (elc.get_attribute("title") or elc.text or "").strip() or None
+            conceito_bruto = (elc.get_attribute("title") or elc.text or "").strip()
+            
+            # Filtrar textos indesejados
+            if conceito_bruto:
+                conceito_bruto = conceito_bruto.replace("TIPOS DE CONCORRÊNCIA", "")
+                conceito_bruto = conceito_bruto.replace("Ver detalhes", "")
+                conceito_bruto = conceito_bruto.replace("ver detalhes", "")
+                conceito_bruto = conceito_bruto.replace("\n", " ").replace("\r", " ")
+                conceito_bruto = " ".join(conceito_bruto.split())  # Remove múltiplos espaços
+                
+                # Se sobrou só categoria, não usar
+                if conceito_bruto.lower() in ["ampla", "ppiq", "pcd"]:
+                    conceito_bruto = ""
+                    
+                conceito_valor = conceito_bruto if conceito_bruto else None
     except Exception:
         conceito_valor = None
 
@@ -331,6 +395,7 @@ def _coletar_notas_ies_review(
         "municipio": municipio,
         "curso": curso,
         "ies": ies_nome,
+        "modalidade_fies": modalidade,
         "conceito_curso": conceito_valor,
         "nota_ultimo_aprovado": nota,
         "nota_enem_ultimo_ampla": enem_por_categoria.get("nota_enem_ultimo_ampla"),
@@ -349,7 +414,17 @@ def buscar_notas_por_municipio(
     registrar_falha: bool = True,
     ies_alvo_nome_norm: Optional[Set[str]] = None,
     ies_alvo_codigo: Optional[Set[str]] = None,
+    modalidade: Optional[str] = None,
 ) -> Tuple[List[Dict], bool]:
+    """
+    Busca notas por município.
+    
+    Args:
+        modalidade: Modalidade FIES a usar ("social", "regular", ou None para usar config)
+    """
+    # Determinar modalidade
+    modalidade_atual = modalidade or str(FIES_MODALIDADE.value)
+    
     resultados: List[Dict] = []
     pesquisa_executada = False
     ies_ja_salvos = ies_ja_salvos or set()
@@ -464,7 +539,21 @@ def buscar_notas_por_municipio(
             continue
         try:
             elc = ctx.driver.find_element(By.ID, conceito_container_presente)
-            conceito_valor = (elc.get_attribute("title") or elc.text or "").strip()
+            conceito_bruto = (elc.get_attribute("title") or elc.text or "").strip()
+            
+            # Filtrar textos indesejados
+            if conceito_bruto:
+                conceito_bruto = conceito_bruto.replace("TIPOS DE CONCORRÊNCIA", "")
+                conceito_bruto = conceito_bruto.replace("Ver detalhes", "")
+                conceito_bruto = conceito_bruto.replace("ver detalhes", "")
+                conceito_bruto = conceito_bruto.replace("\n", " ").replace("\r", " ")
+                conceito_bruto = " ".join(conceito_bruto.split())  # Remove múltiplos espaços
+                
+                # Se sobrou só categoria, não usar
+                if conceito_bruto.lower() in ["ampla", "ppiq", "pcd"]:
+                    conceito_bruto = ""
+                    
+                conceito_valor = conceito_bruto if conceito_bruto else None
         except Exception:
             conceito_valor = None
 
@@ -537,6 +626,7 @@ def buscar_notas_por_municipio(
             "municipio": municipio,
             "curso": "MEDICINA",
             "ies": ies_nome_registro,
+            "modalidade_fies": str(FIES_MODALIDADE.value),
             "conceito_curso": conceito_valor,
             "nota_ultimo_aprovado": nota,
             "nota_enem_ultimo_ampla": enem_por_categoria.get("nota_enem_ultimo_ampla"),
@@ -563,7 +653,7 @@ def buscar_notas_por_municipio(
             if not abrir_nova_consulta(ctx):
                 print("⚠️ Não foi possível acionar 'Nova Consulta' para próxima IES")
                 break
-            if not aplicar_filtros(ctx, estado=estado, municipio=municipio, curso="MEDICINA"):
+            if not aplicar_filtros(ctx, estado=estado, municipio=municipio, curso="MEDICINA", modalidade=modalidade_atual):
                 print("⚠️ Não foi possível reconfigurar filtros após 'Nova Consulta'")
                 break
 
@@ -653,8 +743,22 @@ def _carregar_alvos_review(caminho_falhas: str) -> Dict[Tuple[str, str], Tuple[S
 def run_scraper(
     ctx: BrowserContext,
     alvos_review: Optional[Dict[Tuple[str, str], Tuple[Set[str], Set[str]]]] = None,
+    modalidade: Optional[str] = None,
 ) -> None:
+    """
+    Executa o scraper para coletar notas do FIES.
+    
+    Args:
+        ctx: Contexto do navegador
+        alvos_review: Dicionário de alvos para modo review (opcional)
+        modalidade: Modalidade FIES a processar ("social", "regular", ou None para usar config)
+    """
     driver = ctx.driver
+    
+    # Determinar modalidade a usar
+    modalidade_atual = modalidade or str(FIES_MODALIDADE.value)
+    print(f"📋 Modalidade FIES: {modalidade_atual.upper()}")
+    
     existentes, ja_processados, ultimo_par, ies_por_mun = carregar_progresso("notas_fies_medicina.csv")
     dados_finais: List[Dict] = list(existentes)
 
@@ -700,7 +804,7 @@ def run_scraper(
         primeiro_estado = False
         estado_teve_pesquisa = False
 
-        if not aplicar_filtros(ctx, estado=estado):
+        if not aplicar_filtros(ctx, estado=estado, modalidade=modalidade_atual):
             print("⚠️ Não foi possível selecionar Estado; avançando")
             continue
         human_delay(ctx.fast_mode, 0.2, 0.5)
@@ -725,7 +829,7 @@ def run_scraper(
                 print("⏭️ Já processado — pulando")
                 continue
 
-            if not aplicar_filtros(ctx, estado=estado, municipio=municipio, curso="MEDICINA"):
+            if not aplicar_filtros(ctx, estado=estado, municipio=municipio, curso="MEDICINA", modalidade=modalidade_atual):
                 print("⚠️ Não foi possível aplicar filtros para o município; seguindo para o próximo")
                 continue
 
@@ -738,6 +842,7 @@ def run_scraper(
                     ies_ja_salvos=ies_por_mun.get((uf, municipio), set()),
                     ies_alvo_nome_norm=(alvos_review or {}).get((uf, municipio), (set(), set()))[0] if modo_alvos else None,
                     ies_alvo_codigo=(alvos_review or {}).get((uf, municipio), (set(), set()))[1] if modo_alvos else None,
+                    modalidade=modalidade_atual,
                 )
                 if pesquisou:
                     estado_teve_pesquisa = True
@@ -757,7 +862,7 @@ def run_scraper(
                     if not abrir_nova_consulta(ctx):
                         print("⚠️ Não foi possível acionar 'Nova Consulta' para o próximo município; seguindo mesmo assim")
                     else:
-                        if not aplicar_filtros(ctx, estado=estado):
+                        if not aplicar_filtros(ctx, estado=estado, modalidade=modalidade_atual):
                             print("⚠️ Não foi possível reaplicar estado após 'Nova Consulta'")
                 # se não pesquisou (não havia Medicina), permanecemos e apenas seguimos para aplicar filtros no próximo loop
     print("\n✅ FINALIZADO")
@@ -788,11 +893,22 @@ def _carregar_faltantes_conceito(caminho_csv: str) -> Tuple[Set[Tuple[str, str, 
     return faltantes_nome, faltantes_codigo
 
 
-def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: str = "notas_fies_medicina.csv") -> None:
+def run_checker(
+    ctx: BrowserContext, 
+    curso: str = "MEDICINA", 
+    caminho_csv: str = "notas_fies_medicina.csv",
+    modalidade: Optional[str] = None,
+) -> None:
     """Percorre UF/Município/Curso listando IES e valida cobertura contra o CSV existente.
 
     Se houver registros no CSV sem "conceito_curso", restringe a coleta a eles para acelerar.
+    
+    Args:
+        modalidade: Modalidade FIES a processar ("social", "regular", ou None para usar config)
     """
+    # Determinar modalidade
+    modalidade_atual = modalidade or str(FIES_MODALIDADE.value)
+    print(f"📋 Modalidade FIES: {modalidade_atual.upper()}")
 
     existentes, _, _, ies_por_mun = carregar_progresso(caminho_csv)
     novos: List[Dict] = []  # não deve ser usado em --check; mantido por compatibilidade
@@ -842,7 +958,7 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: str =
     for uf, estado in ESTADOS.items():
         print(f"\n🟦 Estado: {estado}")
 
-        if not aplicar_filtros(ctx, estado=estado):
+        if not aplicar_filtros(ctx, estado=estado, modalidade=modalidade_atual):
             print("⚠️ Não foi possível selecionar Estado; avançando")
             continue
         human_delay(ctx.fast_mode, 0.2, 0.5)
@@ -865,7 +981,7 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: str =
                     print("⏭️ Sem faltantes neste município — pulando")
                     continue
 
-            if not aplicar_filtros(ctx, estado=estado, municipio=municipio, curso=curso):
+            if not aplicar_filtros(ctx, estado=estado, municipio=municipio, curso=curso, modalidade=modalidade_atual):
                 print("⚠️ Não foi possível aplicar filtros para o município; seguindo para o próximo")
                 continue
 
@@ -905,7 +1021,21 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: str =
                 try:
                     if select2_pick_first(ctx, "select2-conceitoCurso-container"):
                         elc = ctx.driver.find_element(By.ID, "select2-conceitoCurso-container")
-                        conceito_valor = (elc.get_attribute("title") or elc.text or "").strip() or None
+                        conceito_bruto = (elc.get_attribute("title") or elc.text or "").strip()
+                        
+                        # Filtrar textos indesejados
+                        if conceito_bruto:
+                            conceito_bruto = conceito_bruto.replace("TIPOS DE CONCORRÊNCIA", "")
+                            conceito_bruto = conceito_bruto.replace("Ver detalhes", "")
+                            conceito_bruto = conceito_bruto.replace("ver detalhes", "")
+                            conceito_bruto = conceito_bruto.replace("\n", " ").replace("\r", " ")
+                            conceito_bruto = " ".join(conceito_bruto.split())  # Remove múltiplos espaços
+                            
+                            # Se sobrou só categoria, não usar
+                            if conceito_bruto.lower() in ["ampla", "ppiq", "pcd"]:
+                                conceito_bruto = ""
+                                
+                            conceito_valor = conceito_bruto if conceito_bruto else None
                 except Exception:
                     conceito_valor = None
 
@@ -929,7 +1059,7 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: str =
                     pass
 
                 if idx_ies < len(ies_lista) - 1:
-                    if not aplicar_filtros(ctx, estado=estado, municipio=municipio, curso=curso):
+                    if not aplicar_filtros(ctx, estado=estado, municipio=municipio, curso=curso, modalidade=modalidade_atual):
                         print("⚠️ Não foi possível reaplicar filtros após IES; interrompendo município")
                         break
 
@@ -967,11 +1097,17 @@ def run_review(
     ctx: BrowserContext,
     caminho_csv: str = "notas_fies_medicina.csv",
     caminho_falhas: str = "notas_fies_medicina_falhas.csv",
+    modalidade: Optional[str] = None,
 ) -> None:
-    """Executa o fluxo padrão restringindo as buscas às IES alvo do CSV de falhas."""
+    """
+    Executa o fluxo padrão restringindo as buscas às IES alvo do CSV de falhas.
+    
+    Args:
+        modalidade: Modalidade FIES a processar ("social", "regular", ou None para usar config)
+    """
     _ = caminho_csv  # assinatura preservada por compatibilidade
     alvos = _carregar_alvos_review(caminho_falhas)
     if not alvos:
         print("⚠️ Sem alvos válidos no CSV de falhas para executar --review")
         return
-    run_scraper(ctx, alvos_review=alvos)
+    run_scraper(ctx, alvos_review=alvos, modalidade=modalidade)
