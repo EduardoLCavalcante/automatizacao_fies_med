@@ -44,3 +44,14 @@ FAILED_ITEMS_FILE: str = "failed_items.json"
 
 # Habilitar/desabilitar logging de timeout
 TIMEOUT_LOGGING_ENABLED: bool = True
+
+# Configurações de mudança de estado inteligente
+ENABLE_INTELLIGENT_STATE_CHANGE: bool = True  # usar lógica inteligente para mudança de estado
+STATE_CHANGE_TIMEOUT: float = 3.0  # timeout para verificar disponibilidade de "Nova Consulta"
+FALLBACK_TO_DIRECT_SELECT: bool = True  # permitir mudança direta como fallback
+
+# Configurações do sistema de retomada/progresso
+PROGRESS_FILE: str = "notas_fies_medicina_progresso.json"  # arquivo de estado de progresso
+CHECKPOINT_FREQUENCY: int = 5  # otimizado: salvar checkpoint a cada 5 IES (reduz I/O em 80%)
+AUTO_BACKUP_PROGRESS: bool = True  # backup automático do arquivo de progresso
+VALIDATE_COMPLETENESS: bool = True  # validar completude antes de pular município

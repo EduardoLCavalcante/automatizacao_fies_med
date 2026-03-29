@@ -8,6 +8,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from webdriver_manager.chrome import ChromeDriverManager
 
 from src.config import (
@@ -46,12 +47,16 @@ def build_browser() -> BrowserContext:
     options.add_argument("--start-maximized")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.page_load_strategy = "none" if FAST_MODE else "normal"
+    
+    # Habilitar log de performance para monitoramento de rede via CDP
+    options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
 
     driver = webdriver.Chrome(
         service=Service(ChromeDriverManager().install()),
         options=options,
     )
-    wait = WebDriverWait(driver, 25 if FAST_MODE else 60)
+    # Otimizado: Reduzido de 25/60 para 10/30 segundos
+    wait = WebDriverWait(driver, 10 if FAST_MODE else 30)
     return BrowserContext(driver=driver, wait=wait, fast_mode=FAST_MODE)
 
 

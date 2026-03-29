@@ -5,10 +5,10 @@
   "final_failures": 0,
   "success_rate_after_retry": 0,
   "timeouts_by_operation": {
-    "select2_exact": 3
+    "select2_exact(select2-noCursosPublico-container, MEDICINA)": 3
   },
   "timeouts_by_state": {
-    "Acre": 3
+    "Alagoas": 3
   },
   "avg_retry_time_seconds": 0.0
 }

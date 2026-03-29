@@ -1,0 +1,77 @@
+{
+  "versao": "2.0",
+  "criado_em": "2026-03-29T10:00:41.450603",
+  "ultima_atualizacao": "2026-03-29T11:15:23.972095",
+  "modalidade_atual": "regular",
+  "resumo": {
+    "estados_completos": 3,
+    "estados_incompletos": 0,
+    "municipios_completos": 4,
+    "municipios_incompletos": 0,
+    "total_ies_coletadas": 5,
+    "modalidade_atual": "regular",
+    "ultima_atualizacao": "2026-03-29T11:15:23.972095"
+  },
+  "estados": {
+    "AC": {
+      "status": "completo",
+      "municipios": {
+        "CRUZEIRO DO SUL": {
+          "status": "completo",
+          "total_ies": 1,
+          "ies_coletadas": 1,
+          "ies_nomes": [
+            "AFYA FACULDADE DE CIÊNCIAS MÉDICAS DE CRUZEIRO DO SUL (24547)"
+          ],
+          "modalidade": "regular",
+          "data_inicio": "2026-03-29T10:00:59.334732",
+          "data_conclusao": "2026-03-29T10:02:32.737594"
+        },
+        "RIO BRANCO": {
+          "status": "completo",
+          "total_ies": 1,
+          "ies_coletadas": 1,
+          "ies_nomes": [
+            "CENTRO UNIVERSITÁRIO UNINORTE (2132)"
+          ],
+          "modalidade": "regular",
+          "data_inicio": "2026-03-29T10:02:48.182076",
+          "data_conclusao": "2026-03-29T10:07:01.765302"
+        }
+      }
+    },
+    "AL": {
+      "status": "completo",
+      "municipios": {
+        "MACEIÓ": {
+          "status": "completo",
+          "total_ies": 2,
+          "ies_coletadas": 2,
+          "ies_nomes": [
+            "AFYA CENTRO UNIVERSITÁRIO UNIMA (4530)",
+            "CENTRO UNIVERSITÁRIO CESMAC (621)"
+          ],
+          "modalidade": "regular",
+          "data_inicio": "2026-03-29T10:07:44.712240",
+          "data_conclusao": "2026-03-29T10:26:33.312878"
+        }
+      }
+    },
+    "AP": {
+      "status": "completo",
+      "municipios": {
+        "MACAPÁ": {
+          "status": "completo",
+          "total_ies": 1,
+          "ies_coletadas": 1,
+          "ies_nomes": [
+            "FACULDADE INTEGRADO DE MACAPÁ/AP (28557)"
+          ],
+          "modalidade": "regular",
+          "data_inicio": "2026-03-29T11:14:30.337795",
+          "data_conclusao": "2026-03-29T11:15:23.967901"
+        }
+      }
+    }
+  }
+}
