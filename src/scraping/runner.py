@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Set, Tuple
 import unicodedata
 
 import pandas as pd
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -368,17 +368,7 @@ def _coletar_notas_ies_review(
     except Exception:
         conceito_valor = None
 
-    try:
-        ctx.wait.until(EC.element_to_be_clickable((By.ID, "btnBuscarCursos"))).click()
-    except TimeoutException:
-        try:
-            ctx.wait.until(
-                EC.element_to_be_clickable(
-                    (By.XPATH, "//input[@id='btnBuscarCursos' or (@type='button' and @value='Pesquisar')]")
-                )
-            ).click()
-        except TimeoutException:
-            return None
+    ctx.wait.until(EC.element_to_be_clickable((By.ID, "btnBuscarCursos"))).click()
 
     nota = None
     for _ in range(2):
@@ -478,19 +468,11 @@ def buscar_notas_por_municipio(
         print("⏭️ Sem Medicina — pulando")
         return resultados, pesquisa_executada
 
-    try:
-        select2_exact(ctx, "select2-noCursosPublico-container", "MEDICINA")
-    except TimeoutException:
-        print("⚠️ Não foi possível selecionar MEDICINA (exato)")
-        return resultados, pesquisa_executada
+    select2_exact(ctx, "select2-noCursosPublico-container", "MEDICINA")
     # Delay removido - select2_exact já tem delay interno
 
     ies_container_ids = ["select2-iesPublico-container"]
-    try:
-        esperar_select2_habilitado(ctx, ies_container_ids[0])
-    except TimeoutException:
-        print("⚠️ IES ainda desabilitado após aguardar")
-        return resultados, pesquisa_executada
+    esperar_select2_habilitado(ctx, ies_container_ids[0])
     ies_lista = listar_opcoes_select2_multi(ctx, ies_container_ids)
     if not ies_lista:
         print("⚠️ Nenhuma IES listada para este município")
@@ -568,12 +550,9 @@ def buscar_notas_por_municipio(
         conceito_container_ids = ["select2-conceitoCurso-container"]
         conceito_container_presente = None
         for cid in conceito_container_ids:
-            try:
-                ctx.wait.until(EC.presence_of_element_located((By.ID, cid)))
-                conceito_container_presente = cid
-                break
-            except TimeoutException:
-                continue
+            ctx.wait.until(EC.presence_of_element_located((By.ID, cid)))
+            conceito_container_presente = cid
+            break
 
         if not conceito_container_presente:
             print("⚠️ Select2 de conceito não disponível após IES")
@@ -610,26 +589,15 @@ def buscar_notas_por_municipio(
         except Exception:
             conceito_valor = None
 
-        try:
-            ctx.wait.until(EC.element_to_be_clickable((By.ID, "btnBuscarCursos"))).click()
-            pesquisa_executada = True
-        except TimeoutException:
-            try:
-                ctx.wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='btnBuscarCursos' or (@type='button' and @value='Pesquisar')]") )).click()
-                pesquisa_executada = True
-            except TimeoutException:
-                print("⚠️ Botão 'Pesquisar' não clicável")
+        ctx.wait.until(EC.element_to_be_clickable((By.ID, "btnBuscarCursos"))).click()
+        pesquisa_executada = True
 
 
 
         linha_ok = False
         nota = None
         for tent in range(2):
-            try:
-                ctx.wait.until(EC.presence_of_element_located((By.XPATH, "//table/tbody/tr")))
-            except TimeoutException:
-                print(f"🔁 Tabela não visível, retentando ({tent+1}/2)")
-                continue
+            ctx.wait.until(EC.presence_of_element_located((By.XPATH, "//table/tbody/tr")))
 
             expandir_todos_candidatos(ctx)
             ultima = obter_ultima_linha_pre_selecionado(ctx)
@@ -1099,9 +1067,6 @@ def run_checker(
             try:
                 esperar_select2_habilitado(ctx, "select2-iesPublico-container")
                 ies_lista = listar_opcoes_select2_multi(ctx, ["select2-iesPublico-container"])
-            except TimeoutException:
-                print("⚠️ IES ainda desabilitado após aguardar — pulando município")
-                ies_lista = []
             except Exception:
                 ies_lista = []
 

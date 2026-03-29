@@ -6,21 +6,17 @@ from typing import List, Optional, Tuple
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException
 
 from src.core import BrowserContext, human_delay
 
 
 def expandir_todos_candidatos(ctx: BrowserContext) -> None:
     driver, wait = ctx.driver, ctx.wait
-    try:
-        wait.until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr")
-            )
+    wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr")
         )
-    except TimeoutException:
-        return
+    )
 
     max_clicks = 500
     sem_crescimento = 0
@@ -100,14 +96,11 @@ def expandir_todos_candidatos(ctx: BrowserContext) -> None:
 
 def obter_ultima_linha(ctx: BrowserContext):
     wait = ctx.wait
-    try:
-        wait.until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr")
-            )
+    wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr")
         )
-    except TimeoutException:
-        return None
+    )
 
     expandir_todos_candidatos(ctx)
 
@@ -131,14 +124,11 @@ def _linha_e_pre_selecionado(linha) -> bool:
 
 def obter_ultima_linha_pre_selecionado(ctx: BrowserContext):
     wait = ctx.wait
-    try:
-        wait.until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr")
-            )
+    wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr")
         )
-    except TimeoutException:
-        return None
+    )
 
     expandir_todos_candidatos(ctx)
 
@@ -165,13 +155,10 @@ def selecionar_categoria(ctx: BrowserContext, tipo_label: Optional[str] = None, 
 
     btn = None
     for by, sel in alvos:
-        try:
-            el = wait.until(EC.element_to_be_clickable((by, sel)))
-            if el and el.is_displayed():
-                btn = el
-                break
-        except TimeoutException:
-            continue
+        el = wait.until(EC.element_to_be_clickable((by, sel)))
+        if el and el.is_displayed():
+            btn = el
+            break
 
     if not btn:
         return False
@@ -188,10 +175,7 @@ def selecionar_categoria(ctx: BrowserContext, tipo_label: Optional[str] = None, 
         except Exception:
             return False
 
-    try:
-        WebDriverWait(driver, 8).until(
-            lambda d: len(d.find_elements(By.XPATH, "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr")) != qtd_antes
-        )
-    except TimeoutException:
-        pass
+    WebDriverWait(driver, 8).until(
+        lambda d: len(d.find_elements(By.XPATH, "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr")) != qtd_antes
+    )
     return True

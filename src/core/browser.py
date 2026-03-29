@@ -7,7 +7,7 @@ from typing import Optional
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from webdriver_manager.chrome import ChromeDriverManager
 
@@ -93,13 +93,10 @@ def wait_page_ready(ctx: BrowserContext, timeout: int = 30) -> bool:
     Returns:
         True se página está pronta, False se timeout
     """
-    try:
-        WebDriverWait(ctx.driver, timeout).until(
-            lambda d: d.execute_script("return document.readyState") == "complete"
-        )
-        return True
-    except TimeoutException:
-        return False
+    WebDriverWait(ctx.driver, timeout).until(
+        lambda d: d.execute_script("return document.readyState") == "complete"
+    )
+    return True
 
 
 def refresh_page_with_retry(
@@ -133,7 +130,7 @@ def refresh_page_with_retry(
                         total_time=attempt * base_delay,
                     )
                 return True
-        except (TimeoutException, WebDriverException) as e:
+        except WebDriverException as e:
             logger.log_timeout(
                 operation="refresh_page",
                 attempt=attempt,
@@ -182,7 +179,7 @@ def navigate_with_retry(
                         total_time=attempt * base_delay,
                     )
                 return True
-        except (TimeoutException, WebDriverException) as e:
+        except WebDriverException as e:
             logger.log_timeout(
                 operation="navigate",
                 attempt=attempt,

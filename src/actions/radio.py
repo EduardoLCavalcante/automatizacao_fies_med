@@ -5,7 +5,6 @@ from typing import Optional
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
 
 from src.core import BrowserContext, human_delay
 from src.config import MAX_RETRIES, RETRY_DELAY
@@ -57,10 +56,7 @@ def selecionar_radio_por_texto(ctx: BrowserContext, texto: str) -> bool:
                     driver.execute_script("arguments[0].click()", lbl)
                 except Exception:
                     lbl.click()
-                try:
-                    wait.until(lambda d: r.is_selected())
-                except TimeoutException:
-                    pass
+                wait.until(lambda d: r.is_selected())
                 human_delay(ctx.fast_mode, 0.2, 0.6)
                 return True
 
@@ -75,17 +71,14 @@ def selecionar_radio_por_texto(ctx: BrowserContext, texto: str) -> bool:
             human_delay(ctx.fast_mode, 0.2, 0.6)
             return True
 
-    try:
-        radio = wait.until(
-            EC.element_to_be_clickable(
-                (By.XPATH, f"//input[@type='radio' and following-sibling::label[contains(normalize-space(.), '{alvo}')]]")
-            )
+    radio = wait.until(
+        EC.element_to_be_clickable(
+            (By.XPATH, f"//input[@type='radio' and following-sibling::label[contains(normalize-space(.), '{alvo}')]]")
         )
-        driver.execute_script("arguments[0].click()", radio)
-        human_delay(ctx.fast_mode, 0.2, 0.6)
-        return True
-    except TimeoutException:
-        return False
+    )
+    driver.execute_script("arguments[0].click()", radio)
+    human_delay(ctx.fast_mode, 0.2, 0.6)
+    return True
 
 
 def selecionar_radio_fies(
@@ -213,7 +206,7 @@ def selecionar_radio_fies(
                 operation="selecionar_radio_fies",
                 attempt=attempt,
                 max_attempts=max_attempts,
-                exception=TimeoutException(f"Não foi possível selecionar {label_text}"),
+                exception=Exception(f"Não foi possível selecionar {label_text}"),
                 context={"modalidade": modalidade_lower},
             )
             

@@ -6,7 +6,7 @@ from typing import Optional
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+from selenium.common.exceptions import StaleElementReferenceException
 
 from src.core import BrowserContext, human_delay, remove_loading_overlay
 from src.core.timeout_log import get_logger
@@ -122,7 +122,7 @@ def abrir_nova_consulta(ctx: BrowserContext, max_attempts: int = MAX_RETRIES) ->
                 )
             return True
             
-        except (TimeoutException, StaleElementReferenceException) as e:
+        except StaleElementReferenceException as e:
             logger.log_timeout(
                 operation="abrir_nova_consulta",
                 attempt=attempt,
@@ -239,16 +239,10 @@ def nova_consulta_disponivel(ctx: BrowserContext, timeout: Optional[float] = Non
     driver = ctx.driver
     timeout_efetivo = timeout if timeout is not None else STATE_CHANGE_TIMEOUT
     
-    try:
-        # Tenta localizar o link "Nova Consulta" com timeout curto
-        WebDriverWait(driver, timeout_efetivo).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "a[href='/consulta']"))
-        )
-        return True
-    except TimeoutException:
-        return False
-    except Exception:
-        return False
+    WebDriverWait(driver, timeout_efetivo).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, "a[href='/consulta']"))
+    )
+    return True
 
 
 def preparar_para_mudanca_estado(

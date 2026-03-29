@@ -7,7 +7,7 @@ import re
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.support.ui import WebDriverWait
 
 from src.core import BrowserContext, human_delay
@@ -307,18 +307,12 @@ def curso_existe(ctx: BrowserContext, nome_curso: str) -> bool:
     # FASE 1: ESPERA - Verificar se o select está INTERAGÍVEL
     # ═══════════════════════════════════════════════════════════════════════
     # ÚNICO local onde usamos timeout/wait
-    try:
-        # Verificar se está habilitado (não desabilitado)
-        esperar_select2_habilitado(ctx, container_id, timeout=5)
-        
-        # Verificar se está clicável
-        container = WebDriverWait(driver, 3 if ctx.fast_mode else 5).until(
-            EC.element_to_be_clickable((By.ID, container_id))
-        )
-    except TimeoutException:
-        # Select não interagível = problema real (requisição anterior pode ter falhado)
-        print(f"⚠️ Select de cursos não está interagível (desabilitado ou bloqueado)")
-        return False
+    esperar_select2_habilitado(ctx, container_id, timeout=5)
+    
+    # Verificar se está clicável
+    container = WebDriverWait(driver, 3 if ctx.fast_mode else 5).until(
+        EC.element_to_be_clickable((By.ID, container_id))
+    )
     
     # ═══════════════════════════════════════════════════════════════════════
     # FASE 2: SEM ESPERA - Abrir dropdown e verificar opções instantaneamente
