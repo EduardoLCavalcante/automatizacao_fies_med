@@ -3,6 +3,7 @@
 import argparse
 from typing import Sequence
 
+import src.config.settings as settings
 from src.core import build_browser, shutdown_browser
 from src.scraping import run_scraper, run_checker, run_review
 
@@ -19,7 +20,28 @@ def main(argv: Sequence[str] | None = None) -> None:
         action="store_true",
         help="Executa exatamente o mesmo fluxo padrão (alias do modo normal)",
     )
+    parser.add_argument(
+        "--modalidade",
+        choices=["social", "regular"],
+        default=None,
+        help="Define modalidade FIES (social ou regular).",
+    )
+    parser.add_argument(
+        "--fies-regular",
+        action="store_true",
+        help="Atalho para forçar modalidade regular (equivalente a --modalidade regular).",
+    )
     args = parser.parse_args(argv)
+
+    modalidade = None
+    if args.fies_regular:
+        modalidade = "regular"
+    elif args.modalidade:
+        modalidade = args.modalidade
+
+    if modalidade:
+        settings.FIES_MODALIDADE = modalidade
+        print(f"📋 Modalidade FIES selecionada: {modalidade.upper()}")
 
     ctx = build_browser()
     try:

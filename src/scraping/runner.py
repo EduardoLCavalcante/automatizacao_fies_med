@@ -11,6 +11,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
+import src.config.settings as settings
 from src.actions import (
     curso_existe,
     listar_opcoes_select2,
@@ -65,6 +66,13 @@ def _norm_label(txt: str) -> str:
     norm = unicodedata.normalize("NFD", txt or "")
     ascii_txt = norm.encode("ascii", "ignore").decode("ascii")
     return " ".join(ascii_txt.lower().split())
+
+
+def _caminho_csv_modalidade(modalidade: str | None = None) -> str:
+    atual = (modalidade or settings.FIES_MODALIDADE or "social").lower()
+    if atual == "regular":
+        return getattr(settings, "REGULAR_CSV_PATH", "notas_fies_medicina_fiesregular.csv")
+    return getattr(settings, "SOCIAL_CSV_PATH", "notas_fies_medicina.csv")
 
 
 def _ies_selecionado(ctx: BrowserContext, container_id: str, esperado: str) -> bool:
@@ -349,10 +357,12 @@ def buscar_notas_por_municipio(
     registrar_falha: bool = True,
     ies_alvo_nome_norm: Optional[Set[str]] = None,
     ies_alvo_codigo: Optional[Set[str]] = None,
+    caminho_csv: Optional[str] = None,
 ) -> Tuple[List[Dict], bool]:
     resultados: List[Dict] = []
     pesquisa_executada = False
     ies_ja_salvos = ies_ja_salvos or set()
+    caminho_csv = caminho_csv or _caminho_csv_modalidade()
 
     select2(ctx, "select2-noMunicipio-container", municipio)
     human_delay(ctx.fast_mode, 0.2, 0.5)
@@ -554,7 +564,7 @@ def buscar_notas_por_municipio(
         if tem_nota:
             resultados.append(registro)
             if salvar_automatico:
-                salvar_incremental([registro])
+                salvar_incremental([registro], caminho=caminho_csv)
             ies_ja_salvos.add(_norm_label(ies_nome_registro))
         else:
             print("⚠️ Nenhuma nota obtida após retentativas — seguindo para próxima IES")
@@ -655,7 +665,8 @@ def run_scraper(
     alvos_review: Optional[Dict[Tuple[str, str], Tuple[Set[str], Set[str]]]] = None,
 ) -> None:
     driver = ctx.driver
-    existentes, ja_processados, ultimo_par, ies_por_mun = carregar_progresso("notas_fies_medicina.csv")
+    caminho_csv = _caminho_csv_modalidade()
+    existentes, ja_processados, ultimo_par, ies_por_mun = carregar_progresso(caminho_csv)
     dados_finais: List[Dict] = list(existentes)
 
     modo_alvos = bool(alvos_review)
@@ -693,10 +704,13 @@ def run_scraper(
                 print("⏭️ Estado já percorrido — pulando")
                 continue
 
-        if not primeiro_estado and estado_teve_pesquisa:
-            if not abrir_nova_consulta(ctx):
-                print("⚠️ Não foi possível abrir 'Nova Consulta' para novo estado; avançando")
-                continue
+        if not primeiro_estado:
+            if estado_teve_pesquisa:
+                if not abrir_nova_consulta(ctx):
+                    print("⚠️ 'Nova Consulta' não disponível — prosseguindo apenas alterando filtros")
+            else:
+                # Não houve pesquisa no estado anterior: o botão não existe; apenas siga alterando filtros
+                print("ℹ️ Sem pesquisa no estado anterior — pulando 'Nova Consulta' e apenas alterando filtros")
         primeiro_estado = False
         estado_teve_pesquisa = False
 
@@ -738,6 +752,7 @@ def run_scraper(
                     ies_ja_salvos=ies_por_mun.get((uf, municipio), set()),
                     ies_alvo_nome_norm=(alvos_review or {}).get((uf, municipio), (set(), set()))[0] if modo_alvos else None,
                     ies_alvo_codigo=(alvos_review or {}).get((uf, municipio), (set(), set()))[1] if modo_alvos else None,
+                    caminho_csv=caminho_csv,
                 )
                 if pesquisou:
                     estado_teve_pesquisa = True
@@ -755,11 +770,13 @@ def run_scraper(
             if i < len(municipios) - 1:
                 if pesquisou:
                     if not abrir_nova_consulta(ctx):
-                        print("⚠️ Não foi possível acionar 'Nova Consulta' para o próximo município; seguindo mesmo assim")
+                        print("⚠️ Não foi possível acionar 'Nova Consulta' para o próximo município; seguindo apenas alterando filtros")
                     else:
                         if not aplicar_filtros(ctx, estado=estado):
                             print("⚠️ Não foi possível reaplicar estado após 'Nova Consulta'")
-                # se não pesquisou (não havia Medicina), permanecemos e apenas seguimos para aplicar filtros no próximo loop
+                else:
+                    # sem pesquisa no município atual: botão não existe; apenas siga para o próximo aplicando filtros no próximo loop
+                    pass
     print("\n✅ FINALIZADO")
 
 
@@ -788,12 +805,13 @@ def _carregar_faltantes_conceito(caminho_csv: str) -> Tuple[Set[Tuple[str, str, 
     return faltantes_nome, faltantes_codigo
 
 
-def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: str = "notas_fies_medicina.csv") -> None:
+def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optional[str] = None) -> None:
     """Percorre UF/Município/Curso listando IES e valida cobertura contra o CSV existente.
 
     Se houver registros no CSV sem "conceito_curso", restringe a coleta a eles para acelerar.
     """
 
+    caminho_csv = caminho_csv or _caminho_csv_modalidade()
     existentes, _, _, ies_por_mun = carregar_progresso(caminho_csv)
     novos: List[Dict] = []  # não deve ser usado em --check; mantido por compatibilidade
     alterados: Set[Tuple[str, str, str]] = set()
@@ -965,11 +983,11 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: str =
 
 def run_review(
     ctx: BrowserContext,
-    caminho_csv: str = "notas_fies_medicina.csv",
+    caminho_csv: Optional[str] = None,
     caminho_falhas: str = "notas_fies_medicina_falhas.csv",
 ) -> None:
     """Executa o fluxo padrão restringindo as buscas às IES alvo do CSV de falhas."""
-    _ = caminho_csv  # assinatura preservada por compatibilidade
+    caminho_csv = caminho_csv or _caminho_csv_modalidade()
     alvos = _carregar_alvos_review(caminho_falhas)
     if not alvos:
         print("⚠️ Sem alvos válidos no CSV de falhas para executar --review")

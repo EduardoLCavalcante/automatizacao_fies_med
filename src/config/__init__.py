@@ -1,4 +1,12 @@
-from .settings import FAST_MODE, CONCEITO_ALVO, BASE_URL, CSV_COLUMNS
+from .settings import (
+    FAST_MODE,
+    CONCEITO_ALVO,
+    BASE_URL,
+    CSV_COLUMNS,
+    SOCIAL_CSV_PATH,
+    REGULAR_CSV_PATH,
+    FIES_MODALIDADE,
+)
 from .estados import ESTADOS
 
 __all__ = [
@@ -6,5 +14,8 @@ __all__ = [
     "CONCEITO_ALVO",
     "BASE_URL",
     "CSV_COLUMNS",
+    "SOCIAL_CSV_PATH",
+    "REGULAR_CSV_PATH",
+    "FIES_MODALIDADE",
     "ESTADOS",
 ]

@@ -94,3 +94,53 @@ def selecionar_radio_fies_social(ctx: BrowserContext) -> bool:
         return True
     except Exception:
         return False
+
+
+def selecionar_radio_fies_regular(ctx: BrowserContext) -> bool:
+    """Seleciona o rádio FIES Regular (id=stCadunicoN, value=N)."""
+    driver, wait = ctx.driver, ctx.wait
+    alvo = "Fies"
+
+    # Tenta por texto genérico "Fies" (rótulo regular)
+    if selecionar_radio_por_texto(ctx, alvo):
+        try:
+            marcado = driver.find_elements(
+                By.XPATH,
+                "//input[@type='radio' and @id='stCadunicoN' and @value='N' and @checked]",
+            )
+            if marcado:
+                return True
+        except Exception:
+            pass
+
+    # Tenta clicar diretamente na label do regular
+    try:
+        lbl = wait.until(
+            EC.element_to_be_clickable(
+                (By.XPATH, "//label[contains(normalize-space(.), 'Fies') and not(contains(., 'Social'))]")
+            )
+        )
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", lbl)
+        try:
+            lbl.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", lbl)
+        human_delay(ctx.fast_mode, 0.2, 0.6)
+        return True
+    except Exception:
+        pass
+
+    # Fallback: clique direto no input pelo id/value
+    try:
+        radio = wait.until(
+            EC.element_to_be_clickable((By.XPATH, "//input[@type='radio' and @id='stCadunicoN' and @value='N']"))
+        )
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", radio)
+        try:
+            radio.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", radio)
+        human_delay(ctx.fast_mode, 0.2, 0.6)
+        return True
+    except Exception:
+        return False

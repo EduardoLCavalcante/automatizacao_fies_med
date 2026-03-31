@@ -6,7 +6,7 @@ import re
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.support.ui import WebDriverWait
 
 from src.core import BrowserContext, human_delay
@@ -119,7 +119,7 @@ def select2_exact(ctx: BrowserContext, container_id: str, texto: str) -> None:
                 human_delay(ctx.fast_mode, 0.2, 0.5 if ctx.fast_mode else 0.8)
             else:
                 driver.find_element(By.TAG_NAME, "body").click()
-                raise TimeoutException(f"Opção exata não encontrada para: {texto}")
+                raise RuntimeError(f"Opção exata não encontrada para: {texto}")
 
             driver.find_element(By.TAG_NAME, "body").click()
             return
@@ -158,7 +158,7 @@ def curso_existe(ctx: BrowserContext, nome_curso: str) -> bool:
 
         driver.find_element(By.TAG_NAME, "body").click()
         return existe
-    except TimeoutException:
+    except Exception:
         driver.find_element(By.TAG_NAME, "body").click()
         return False
 
