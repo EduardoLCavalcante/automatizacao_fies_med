@@ -11,7 +11,6 @@ CSV_COLUMNS = [
     "curso",
     "ies",
     "conceito_curso",
-    "nota_ultimo_aprovado",
     "nota_enem_ultimo_ampla",
     "nota_enem_ultimo_ppiq",
     "nota_enem_ultimo_pcd",

@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Set, Tuple
 import unicodedata
 
 import pandas as pd
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -24,7 +24,7 @@ from src.actions import (
     esperar_select2_habilitado,
 )
 from src.config import CSV_COLUMNS, ESTADOS
-from src.core import BrowserContext, human_delay, normalizar_decimal_pt
+from src.core import BrowserContext, human_delay, normalizar_decimal_pt, com_retry_timeout
 from src.navigation import abrir_nova_consulta, aplicar_filtros, preparar_primeira_pagina
 from src.scraping.extract import extrair_nota_enem_de_linha
 from src.scraping.table import (
@@ -340,11 +340,23 @@ def _coletar_notas_ies_review(
         "curso": curso,
         "ies": ies_nome,
         "conceito_curso": conceito_valor,
-        "nota_ultimo_aprovado": nota,
         "nota_enem_ultimo_ampla": enem_por_categoria.get("nota_enem_ultimo_ampla"),
         "nota_enem_ultimo_ppiq": enem_por_categoria.get("nota_enem_ultimo_ppiq"),
         "nota_enem_ultimo_pcd": enem_por_categoria.get("nota_enem_ultimo_pcd"),
     }
+
+
+def _pesquisar_e_aguardar(ctx: BrowserContext) -> None:
+    """Clica em Pesquisar e aguarda a tabela de resultados aparecer."""
+    try:
+        ctx.wait.until(EC.element_to_be_clickable((By.ID, "btnBuscarCursos"))).click()
+    except TimeoutException:
+        ctx.wait.until(
+            EC.element_to_be_clickable(
+                (By.XPATH, "//input[@id='btnBuscarCursos' or (@type='button' and @value='Pesquisar')]")
+            )
+        ).click()
+    ctx.wait.until(EC.presence_of_element_located((By.XPATH, "//table/tbody/tr")))
 
 
 def buscar_notas_por_municipio(
@@ -479,39 +491,39 @@ def buscar_notas_por_municipio(
             conceito_valor = None
 
         try:
-            ctx.wait.until(EC.element_to_be_clickable((By.ID, "btnBuscarCursos"))).click()
+            com_retry_timeout(
+                ctx,
+                operacao=lambda: _pesquisar_e_aguardar(ctx),
+                descricao=f"pesquisa IES '{ies}' em {municipio}/{uf}",
+            )
             pesquisa_executada = True
-        except TimeoutException:
-            try:
-                ctx.wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@id='btnBuscarCursos' or (@type='button' and @value='Pesquisar')]") )).click()
-                pesquisa_executada = True
-            except TimeoutException:
-                print("⚠️ Botão 'Pesquisar' não clicável")
-
-
+        except (TimeoutException, WebDriverException):
+            print(f"⚠️ Falha persistente ao pesquisar IES '{ies}' em {municipio} após retentativas — registrando falha")
+            if registrar_falha:
+                salvar_falha_ies({
+                    "estado": uf,
+                    "municipio": municipio,
+                    "curso": "MEDICINA",
+                    "ies": ies,
+                    "ies_codigo": codigo_lista,
+                    "motivo": "timeout_pesquisa",
+                })
+            continue
 
         linha_ok = False
         nota = None
-        for tent in range(2):
-            try:
-                ctx.wait.until(EC.presence_of_element_located((By.XPATH, "//table/tbody/tr")))
-            except TimeoutException:
-                print(f"🔁 Tabela não visível, retentando ({tent+1}/2)")
-                continue
 
-            expandir_todos_candidatos(ctx)
-            ultima = obter_ultima_linha_pre_selecionado(ctx)
-            if ultima:
-                try:
-                    tds = ultima.find_elements(By.TAG_NAME, "td")
-                    tds = _filtrar_celulas_concorrencia(tds)
-                    if len(tds) >= 5:
-                        nota = tds[4].text.replace(",", ".")
-                        linha_ok = True
-                        break
-                except Exception:
-                    nota = None
-            print(f"🔁 Linha não encontrada, retentando ({tent+1}/2)")
+        expandir_todos_candidatos(ctx)
+        ultima = obter_ultima_linha_pre_selecionado(ctx)
+        if ultima:
+            try:
+                tds = ultima.find_elements(By.TAG_NAME, "td")
+                tds = _filtrar_celulas_concorrencia(tds)
+                if len(tds) >= 5:
+                    nota = tds[4].text.replace(",", ".")
+                    linha_ok = True
+            except Exception:
+                nota = None
 
         categorias = [
             ("Ampla", 1, "nota_enem_ultimo_ampla"),
@@ -548,14 +560,14 @@ def buscar_notas_por_municipio(
             "curso": "MEDICINA",
             "ies": ies_nome_registro,
             "conceito_curso": conceito_valor,
-            "nota_ultimo_aprovado": nota,
+            
             "nota_enem_ultimo_ampla": enem_por_categoria.get("nota_enem_ultimo_ampla"),
             "nota_enem_ultimo_ppiq": enem_por_categoria.get("nota_enem_ultimo_ppiq"),
             "nota_enem_ultimo_pcd": enem_por_categoria.get("nota_enem_ultimo_pcd"),
         }
 
         tem_nota = any([
-            registro["nota_ultimo_aprovado"],
+            
             registro["nota_enem_ultimo_ampla"],
             registro["nota_enem_ultimo_ppiq"],
             registro["nota_enem_ultimo_pcd"],
