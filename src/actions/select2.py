@@ -1,5 +1,6 @@
 """Ações de interação com Select2 (listas e seleções)."""
 
+import time
 from typing import Iterable, List
 import unicodedata
 import re
@@ -164,37 +165,47 @@ def curso_existe(ctx: BrowserContext, nome_curso: str) -> bool:
 
 
 def listar_opcoes_select2(ctx: BrowserContext, container_id: str) -> List[str]:
-    driver, wait = ctx.driver, ctx.wait
-    container = wait.until(EC.element_to_be_clickable((By.ID, container_id)))
-    container.click()
+    max_tentativas = 3
+    ultima_exc = None
+    for tentativa in range(max_tentativas):
+        try:
+            driver, wait = ctx.driver, ctx.wait
+            container = wait.until(EC.element_to_be_clickable((By.ID, container_id)))
+            container.click()
 
-    results = wait.until(
-        EC.presence_of_element_located(
-            (By.CLASS_NAME, "select2-results__options")
-        )
-    )
+            results = wait.until(
+                EC.presence_of_element_located(
+                    (By.CLASS_NAME, "select2-results__options")
+                )
+            )
 
-    opcoes = set()
-    last_count = 0
+            opcoes = set()
+            last_count = 0
 
-    while True:
-        itens = results.find_elements(By.CLASS_NAME, "select2-results__option")
-        for item in itens:
-            txt = item.text.strip()
-            if txt and "Selecione" not in txt:
-                opcoes.add(txt)
+            while True:
+                itens = results.find_elements(By.CLASS_NAME, "select2-results__option")
+                for item in itens:
+                    txt = item.text.strip()
+                    if txt and "Selecione" not in txt:
+                        opcoes.add(txt)
 
-        if len(opcoes) == last_count:
-            break
+                if len(opcoes) == last_count:
+                    break
 
-        last_count = len(opcoes)
-        driver.execute_script(
-            "arguments[0].scrollTop = arguments[0].scrollHeight", results
-        )
-        human_delay(ctx.fast_mode, 0.8, 0.8)
+                last_count = len(opcoes)
+                driver.execute_script(
+                    "arguments[0].scrollTop = arguments[0].scrollHeight", results
+                )
+                human_delay(ctx.fast_mode, 0.8, 0.8)
 
-    driver.find_element(By.TAG_NAME, "body").click()
-    return sorted(opcoes)
+            driver.find_element(By.TAG_NAME, "body").click()
+            return sorted(opcoes)
+        except StaleElementReferenceException as exc:
+            ultima_exc = exc
+            print(f"🔁 StaleElement em listar_opcoes_select2 (tentativa {tentativa + 1}/{max_tentativas}), retentando...")
+            time.sleep(0.5)
+            continue
+    raise ultima_exc
 
 
 def listar_opcoes_select2_rapido(ctx: BrowserContext, container_id: str) -> List[str]:
