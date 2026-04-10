@@ -2,7 +2,7 @@
 
 import os
 import re
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 import unicodedata
 
 import pandas as pd
@@ -73,6 +73,13 @@ def _caminho_csv_modalidade(modalidade: str | None = None) -> str:
     if atual == "regular":
         return getattr(settings, "REGULAR_CSV_PATH", "notas_fies_medicina_fiesregular.csv")
     return getattr(settings, "SOCIAL_CSV_PATH", "notas_fies_medicina.csv")
+
+
+def _caminho_faltantes_modalidade(modalidade: str | None = None) -> str:
+    atual = (modalidade or settings.FIES_MODALIDADE or "social").lower()
+    if atual == "regular":
+        return "notas_fies_medicina_faltantes_regular.txt"
+    return "notas_fies_medicina_faltantes.txt"
 
 
 def _ies_selecionado(ctx: BrowserContext, container_id: str, esperado: str) -> bool:
@@ -642,9 +649,77 @@ def _carregar_alvos_review(caminho_falhas: str) -> Dict[Tuple[str, str], Tuple[S
     return alvos
 
 
+def _carregar_alvos_faltantes_txt(
+    caminho_txt: str,
+) -> Tuple[
+    Dict[Tuple[str, str], Tuple[Set[str], Set[str]]],
+    List[str],
+    Dict[Tuple[str, str, str], Set[int]],
+    Dict[Tuple[str, str, str], Set[int]],
+    int,
+]:
+    alvos: Dict[Tuple[str, str], Tuple[Set[str], Set[str]]] = {}
+    try:
+        with open(caminho_txt, "r", encoding="utf-8") as f:
+            linhas = [linha.rstrip("\n\r") for linha in f]
+    except Exception:
+        return {}, [], {}, {}, 0
+
+    indices_nome: Dict[Tuple[str, str, str], Set[int]] = {}
+    indices_codigo: Dict[Tuple[str, str, str], Set[int]] = {}
+    invalidas = 0
+    vistos: Set[Tuple[str, str, str, str]] = set()
+
+    for idx, linha in enumerate(linhas):
+        texto = linha.strip()
+        if not texto:
+            continue
+        partes = [p.strip() for p in texto.split("|")]
+        if len(partes) < 4:
+            invalidas += 1
+            continue
+        uf_raw, municipio, ies_nome, ies_codigo = partes[0], partes[1], partes[2], partes[3]
+        if not uf_raw or not municipio or not ies_nome:
+            invalidas += 1
+            continue
+
+        uf, _estado = _resolver_uf_estado(uf_raw)
+        if not uf:
+            invalidas += 1
+            continue
+
+        ies_nome_norm = _norm_label(ies_nome)
+        dedup_key = (uf, municipio, ies_nome_norm, ies_codigo or "")
+        if dedup_key in vistos:
+            continue
+        vistos.add(dedup_key)
+
+        chave_mun = (uf, municipio)
+        nomes, codigos = alvos.get(chave_mun, (set(), set()))
+        if ies_nome_norm:
+            nomes.add(ies_nome_norm)
+            key_nome = (uf, municipio, ies_nome_norm)
+            indices_nome.setdefault(key_nome, set()).add(idx)
+        if ies_codigo:
+            codigos.add(ies_codigo)
+            key_cod = (uf, municipio, ies_codigo)
+            indices_codigo.setdefault(key_cod, set()).add(idx)
+        alvos[chave_mun] = (nomes, codigos)
+
+    return alvos, linhas, indices_nome, indices_codigo, invalidas
+
+
+def _persistir_faltantes_restantes(caminho_txt: str, linhas: List[str], removidos: Set[int]) -> None:
+    restantes = [linha for idx, linha in enumerate(linhas) if idx not in removidos and linha.strip()]
+    with open(caminho_txt, "w", encoding="utf-8") as f:
+        if restantes:
+            f.write("\n".join(restantes) + "\n")
+
+
 def run_scraper(
     ctx: BrowserContext,
     alvos_review: Optional[Dict[Tuple[str, str], Tuple[Set[str], Set[str]]]] = None,
+    on_registro_salvo: Optional[Callable[[Dict], None]] = None,
 ) -> None:
     driver = ctx.driver
     caminho_csv = _caminho_csv_modalidade()
@@ -741,6 +816,8 @@ def run_scraper(
                 for r in res:
                     dados_finais.append(r)
                     ies_por_mun.setdefault((uf, municipio), set()).add(_norm_label(r.get("ies", "")))
+                    if on_registro_salvo:
+                        on_registro_salvo(r)
             except Exception:
                 pesquisou = False
 
@@ -760,6 +837,65 @@ def run_scraper(
                     # sem pesquisa no município atual: botão não existe; apenas siga para o próximo aplicando filtros no próximo loop
                     pass
     print("\n✅ FINALIZADO")
+
+
+def run_faltantes_txt(
+    ctx: BrowserContext,
+    caminho_txt: Optional[str] = None,
+    caminho_csv: Optional[str] = None,
+) -> None:
+    caminho_txt = caminho_txt or _caminho_faltantes_modalidade()
+    caminho_csv = caminho_csv or _caminho_csv_modalidade()
+
+    if not os.path.exists(caminho_txt):
+        print(f"⚠️ Arquivo de faltantes não encontrado: {caminho_txt}")
+        return
+
+    alvos, linhas, indices_nome, indices_codigo, invalidas = _carregar_alvos_faltantes_txt(caminho_txt)
+    total_linhas = len([l for l in linhas if l.strip()])
+    total_alvos = sum(len(nomes) + len(codigos) for nomes, codigos in alvos.values())
+    print(
+        f"📄 Faltantes TXT: arquivo={caminho_txt} | linhas={total_linhas} | "
+        f"invalidas={invalidas} | alvos={total_alvos}"
+    )
+    if not alvos:
+        print("⚠️ Sem alvos válidos no TXT de faltantes")
+        return
+
+    removidos: Set[int] = set()
+    removidos_sucesso = 0
+
+    def _marcar_sucesso_e_persistir(registro: Dict) -> None:
+        nonlocal removidos_sucesso
+        uf = str(registro.get("estado", "")).strip()
+        municipio = str(registro.get("municipio", "")).strip()
+        ies = str(registro.get("ies", "")).strip()
+        ies_norm = _norm_label(ies)
+        codigo = _extrair_codigo_ies(ies)
+
+        idxs: Set[int] = set()
+        if codigo:
+            idxs |= indices_codigo.get((uf, municipio, codigo), set())
+        if ies_norm:
+            idxs |= indices_nome.get((uf, municipio, ies_norm), set())
+
+        novos_idxs = idxs - removidos
+        if not novos_idxs:
+            return
+        removidos |= novos_idxs
+        removidos_sucesso += len(novos_idxs)
+        try:
+            _persistir_faltantes_restantes(caminho_txt, linhas, removidos)
+        except Exception as exc:
+            print(f"⚠️ Falha ao atualizar TXT de faltantes: {exc}")
+
+    run_scraper(ctx, alvos_review=alvos, on_registro_salvo=_marcar_sucesso_e_persistir)
+
+    restantes = len([l for idx, l in enumerate(linhas) if idx not in removidos and l.strip()])
+    print(
+        f"📊 Faltantes processados: removidos_txt={removidos_sucesso} | "
+        f"restantes_txt={restantes} | csv={caminho_csv}"
+    )
 
 
 def _carregar_faltantes_conceito(caminho_csv: str) -> Tuple[Set[Tuple[str, str, str]], Set[Tuple[str, str, str]]]:
@@ -794,12 +930,31 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
     """
 
     caminho_csv = caminho_csv or _caminho_csv_modalidade()
+    modalidade_atual = (settings.FIES_MODALIDADE or "social").lower()
+    if modalidade_atual == "regular":
+        caminho_faltantes = "notas_fies_medicina_faltantes_regular.txt"
+    else:
+        caminho_faltantes = "notas_fies_medicina_faltantes.txt"
     existentes, _, _, ies_por_mun = carregar_progresso(caminho_csv)
     novos: List[Dict] = []  # não deve ser usado em --check; mantido por compatibilidade
     alterados: Set[Tuple[str, str, str]] = set()
     houve_mudanca = False
     faltantes_txt: List[str] = []
     faltantes_txt_set: Set[str] = set()
+    municipios_verificados = 0
+    municipios_indisponibilidade_confirmada = 0
+    municipios_recuperados_retry = 0
+    falhas_transitorias_municipio = 0
+
+    if os.path.exists(caminho_faltantes):
+        try:
+            with open(caminho_faltantes, "r", encoding="utf-8") as f:
+                for linha_existente in f:
+                    linha_existente = linha_existente.strip()
+                    if linha_existente:
+                        faltantes_txt_set.add(linha_existente)
+        except Exception:
+            pass
 
     def _registrar_faltante_txt(uf_val: str, mun_val: str, ies_val: str, cod_val: Optional[str]) -> None:
         linha = f"{uf_val}|{mun_val}|{ies_val}|{cod_val or ''}"
@@ -807,6 +962,41 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
             return
         faltantes_txt_set.add(linha)
         faltantes_txt.append(linha)
+        try:
+            with open(caminho_faltantes, "a", encoding="utf-8") as f:
+                f.write(f"{linha}\n")
+        except Exception as exc:
+            print(f"⚠️ Falha ao registrar faltante imediatamente: {exc}")
+
+    def _aplicar_filtros_check_resiliente(uf_val: str, estado_val: str, municipio_val: str, curso_val: str) -> Tuple[bool, str, int]:
+        tentativas_max = 3
+        for tentativa in range(1, tentativas_max + 1):
+            if aplicar_filtros(ctx, estado=estado_val, municipio=municipio_val, curso=curso_val):
+                return True, "ok", tentativa
+
+            disponibilidade_confirmada = []
+            for _ in range(2):
+                try:
+                    ok_base = aplicar_filtros(ctx, estado=estado_val, municipio=municipio_val, curso=None)
+                    if not ok_base:
+                        disponibilidade_confirmada.append(None)
+                    else:
+                        esperar_select2_habilitado(ctx, "select2-noCursosPublico-container")
+                        disponibilidade_confirmada.append(curso_existe(ctx, curso_val))
+                except Exception:
+                    disponibilidade_confirmada.append(None)
+                human_delay(ctx.fast_mode, 0.15, 0.3)
+
+            if disponibilidade_confirmada == [False, False]:
+                return False, "indisponivel_confirmado", tentativa
+
+            print(
+                f"🔁 Filtro de curso instável em {municipio_val}/{uf_val} "
+                f"(tentativa {tentativa}/{tentativas_max}) — retentando"
+            )
+            human_delay(ctx.fast_mode, 0.3, 0.6)
+
+        return False, "falha_transitoria", tentativas_max
 
     faltantes_nome, faltantes_codigo = _carregar_faltantes_conceito(caminho_csv)
     if faltantes_nome or faltantes_codigo:
@@ -865,9 +1055,20 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
                     print("⏭️ Sem faltantes neste município — pulando")
                     continue
 
-            if not aplicar_filtros(ctx, estado=estado, municipio=municipio, curso=curso):
-                print("⚠️ Não foi possível aplicar filtros para o município; seguindo para o próximo")
+            municipios_verificados += 1
+            ok_filtros, motivo_filtros, tentativas_filtros = _aplicar_filtros_check_resiliente(
+                uf, estado, municipio, curso
+            )
+            if not ok_filtros:
+                if motivo_filtros == "indisponivel_confirmado":
+                    municipios_indisponibilidade_confirmada += 1
+                    print(f"⏭️ {curso} indisponível após dupla checagem em {municipio}/{uf} — pulando município")
+                else:
+                    falhas_transitorias_municipio += 1
+                    print(f"⚠️ Falha transitória ao aplicar filtros em {municipio}/{uf} — seguindo para o próximo")
                 continue
+            if tentativas_filtros > 1:
+                municipios_recuperados_retry += 1
 
             try:
                 esperar_select2_habilitado(ctx, "select2-iesPublico-container")
@@ -929,8 +1130,16 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
                     pass
 
                 if idx_ies < len(ies_lista) - 1:
-                    if not aplicar_filtros(ctx, estado=estado, municipio=municipio, curso=curso):
-                        print("⚠️ Não foi possível reaplicar filtros após IES; interrompendo município")
+                    ok_refiltro, motivo_refiltro, _ = _aplicar_filtros_check_resiliente(
+                        uf, estado, municipio, curso
+                    )
+                    if not ok_refiltro:
+                        if motivo_refiltro == "indisponivel_confirmado":
+                            municipios_indisponibilidade_confirmada += 1
+                            print(f"⏭️ {curso} indisponível após dupla checagem em {municipio}/{uf} durante refiltro")
+                        else:
+                            falhas_transitorias_municipio += 1
+                            print("⚠️ Não foi possível reaplicar filtros após IES por falha transitória")
                         break
 
             # antes do próximo município, reseta seleção de IES/curso para evitar travar selects
@@ -953,12 +1162,15 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
         print("✅ Nenhuma atualização necessária — CSV já cobre todos os itens listados")
 
     if faltantes_txt:
-        try:
-            with open("notas_fies_medicina_faltantes.txt", "w", encoding="utf-8") as f:
-                f.write("\n".join(faltantes_txt))
-            print(f"📝 TXT de faltantes gerado: {len(faltantes_txt)} linha(s)")
-        except Exception as exc:
-            print(f"⚠️ Falha ao escrever TXT de faltantes: {exc}")
+        print(f"📝 TXT de faltantes atualizado em tempo real: {len(faltantes_txt)} nova(s) linha(s)")
+
+    print(
+        "📊 Auditoria --check: "
+        f"municipios_verificados={municipios_verificados} | "
+        f"recuperados_retry={municipios_recuperados_retry} | "
+        f"indisponibilidade_confirmada={municipios_indisponibilidade_confirmada} | "
+        f"falhas_transitorias={falhas_transitorias_municipio}"
+    )
 
     print("\n✅ CHECK FINALIZADO")
 

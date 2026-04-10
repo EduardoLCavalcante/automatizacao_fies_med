@@ -5,7 +5,7 @@ from typing import Sequence
 
 import src.config.settings as settings
 from src.core import build_browser, shutdown_browser
-from src.scraping import run_scraper, run_checker, run_review
+from src.scraping import run_scraper, run_checker, run_review, run_faltantes_txt
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -31,6 +31,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         action="store_true",
         help="Atalho para forçar modalidade regular (equivalente a --modalidade regular).",
     )
+    parser.add_argument(
+        "--faltantes-txt",
+        nargs="?",
+        const="",
+        default=None,
+        help="Executa apenas alvos de um TXT de faltantes (padrão por modalidade se omitido).",
+    )
     args = parser.parse_args(argv)
 
     modalidade = None
@@ -45,7 +52,10 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     ctx = build_browser()
     try:
-        if args.review:
+        if args.faltantes_txt is not None:
+            caminho_faltantes = args.faltantes_txt or None
+            run_faltantes_txt(ctx, caminho_txt=caminho_faltantes)
+        elif args.review:
             run_review(ctx)
         elif args.check:
             run_checker(ctx)

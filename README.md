@@ -77,6 +77,15 @@ python main.py --check
 
 # Modo review (executar o fluxo padrão)
 python main.py --review
+
+# Executar apenas itens do TXT de faltantes (arquivo padrão da modalidade)
+python main.py --faltantes-txt
+
+# Executar apenas itens de um TXT específico
+python main.py --faltantes-txt notas_fies_medicina_faltantes.txt
+
+# Executar faltantes da modalidade regular
+python main.py --faltantes-txt --modalidade regular
 ```
 
 ### Comportamento em caso de timeout/erro 504
