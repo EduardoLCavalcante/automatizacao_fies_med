@@ -284,20 +284,6 @@ def _coletar_notas_ies_review(
         except TimeoutException:
             return None
 
-    nota = None
-    for _ in range(2):
-        try:
-            ctx.wait.until(EC.presence_of_element_located((By.XPATH, "//table/tbody/tr")))
-            expandir_todos_candidatos(ctx)
-            ultima = obter_ultima_linha_pre_selecionado(ctx)
-            if ultima:
-                tds = _filtrar_celulas_concorrencia(ultima.find_elements(By.TAG_NAME, "td"))
-                if len(tds) >= 5:
-                    nota = normalizar_decimal_pt((tds[4].text or "").replace(",", "."))
-                    break
-        except Exception:
-            continue
-
     categorias = [
         ("Ampla", 1, "nota_enem_ultimo_ampla"),
         ("PPIQ", 3, "nota_enem_ultimo_ppiq"),
@@ -325,7 +311,6 @@ def _coletar_notas_ies_review(
     tem_dado = any(
         [
             conceito_valor,
-            nota,
             enem_por_categoria.get("nota_enem_ultimo_ampla"),
             enem_por_categoria.get("nota_enem_ultimo_ppiq"),
             enem_por_categoria.get("nota_enem_ultimo_pcd"),
@@ -509,21 +494,6 @@ def buscar_notas_por_municipio(
                     "motivo": "timeout_pesquisa",
                 })
             continue
-
-        linha_ok = False
-        nota = None
-
-        expandir_todos_candidatos(ctx)
-        ultima = obter_ultima_linha_pre_selecionado(ctx)
-        if ultima:
-            try:
-                tds = ultima.find_elements(By.TAG_NAME, "td")
-                tds = _filtrar_celulas_concorrencia(tds)
-                if len(tds) >= 5:
-                    nota = tds[4].text.replace(",", ".")
-                    linha_ok = True
-            except Exception:
-                nota = None
 
         categorias = [
             ("Ampla", 1, "nota_enem_ultimo_ampla"),
