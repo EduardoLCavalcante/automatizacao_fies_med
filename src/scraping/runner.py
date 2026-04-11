@@ -827,7 +827,8 @@ def run_scraper(
             human_delay(ctx.fast_mode, 0.3, 0.7)
 
             if i < len(municipios) - 1:
-                if pesquisou:
+                deve_acionar_nova_consulta = modo_alvos or pesquisou
+                if deve_acionar_nova_consulta:
                     if not abrir_nova_consulta(ctx):
                         print("⚠️ Não foi possível acionar 'Nova Consulta' para o próximo município; seguindo apenas alterando filtros")
                     else:
@@ -898,14 +899,18 @@ def run_faltantes_txt(
     )
 
 
-def _carregar_faltantes_conceito(caminho_csv: str) -> Tuple[Set[Tuple[str, str, str]], Set[Tuple[str, str, str]]]:
+def _carregar_faltantes_conceito(
+    caminho_csv: str,
+) -> Tuple[Set[Tuple[str, str, str]], Set[Tuple[str, str, str]], List[Tuple[str, str]]]:
     faltantes_nome: Set[Tuple[str, str, str]] = set()
     faltantes_codigo: Set[Tuple[str, str, str]] = set()
+    ordem_municipios_reversa: List[Tuple[str, str]] = []
+    ordem_municipios_set: Set[Tuple[str, str]] = set()
     if not os.path.exists(caminho_csv):
-        return faltantes_nome, faltantes_codigo
+        return faltantes_nome, faltantes_codigo, ordem_municipios_reversa
     try:
         df = pd.read_csv(caminho_csv)
-        for _, row in df.iterrows():
+        for _, row in df.iloc[::-1].iterrows():
             conceito = str(row.get("conceito_curso", "")).strip()
             if conceito:
                 continue
@@ -918,9 +923,12 @@ def _carregar_faltantes_conceito(caminho_csv: str) -> Tuple[Set[Tuple[str, str, 
             cod = _extrair_codigo_ies(ies_raw)
             if uf and mun and cod:
                 faltantes_codigo.add((uf, mun, cod))
+            if uf and mun and (uf, mun) not in ordem_municipios_set:
+                ordem_municipios_reversa.append((uf, mun))
+                ordem_municipios_set.add((uf, mun))
     except Exception:
         pass
-    return faltantes_nome, faltantes_codigo
+    return faltantes_nome, faltantes_codigo, ordem_municipios_reversa
 
 
 def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optional[str] = None) -> None:
@@ -998,11 +1006,12 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
 
         return False, "falha_transitoria", tentativas_max
 
-    faltantes_nome, faltantes_codigo = _carregar_faltantes_conceito(caminho_csv)
+    faltantes_nome, faltantes_codigo, ordem_municipios_reversa = _carregar_faltantes_conceito(caminho_csv)
     if faltantes_nome or faltantes_codigo:
         print(
             f"ℹ️ Encontrados {len(faltantes_nome)} faltantes por nome e {len(faltantes_codigo)} por código — checando apenas eles"
         )
+        print(f"↕️ Ordem do --check priorizada pelo CSV (de baixo para cima): {len(ordem_municipios_reversa)} município(s)")
 
     # índices rápidos para atualizar registros existentes (por nome normalizado e por código de IES)
     existentes_idx: Dict[Tuple[str, str, str], Dict] = {}
@@ -1029,7 +1038,29 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
 
     preparar_primeira_pagina(ctx)
 
-    for uf, estado in ESTADOS.items():
+    ufs_csv_reverso: List[str] = []
+    ufs_csv_set: Set[str] = set()
+    for reg in reversed(existentes):
+        uf_reg = str(reg.get("estado", "")).strip()
+        if uf_reg and uf_reg in ESTADOS and uf_reg not in ufs_csv_set:
+            ufs_csv_reverso.append(uf_reg)
+            ufs_csv_set.add(uf_reg)
+
+    if ordem_municipios_reversa:
+        municipios_por_uf: Dict[str, List[str]] = {}
+        for uf, mun in ordem_municipios_reversa:
+            municipios_por_uf.setdefault(uf, []).append(mun)
+        ufs_com_municipios = [uf for uf in municipios_por_uf.keys() if uf in ESTADOS]
+        ufs_prioritarios = [uf for uf in ufs_csv_reverso if uf in municipios_por_uf]
+        ufs_restantes = [uf for uf in ufs_com_municipios if uf not in set(ufs_prioritarios)]
+        estados_iteracao: List[Tuple[str, str]] = [(uf, ESTADOS[uf]) for uf in (ufs_prioritarios + ufs_restantes)]
+    else:
+        municipios_por_uf = {}
+        ufs_prioritarios = [uf for uf in ufs_csv_reverso if uf in ESTADOS]
+        ufs_restantes = [uf for uf in ESTADOS.keys() if uf not in set(ufs_prioritarios)]
+        estados_iteracao = [(uf, ESTADOS[uf]) for uf in (ufs_prioritarios + ufs_restantes)]
+
+    for uf, estado in estados_iteracao:
         print(f"\n🟦 Estado: {estado}")
 
         if not aplicar_filtros(ctx, estado=estado):
@@ -1037,11 +1068,14 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
             continue
         human_delay(ctx.fast_mode, 0.2, 0.5)
 
-        try:
-            municipios = listar_opcoes_select2(ctx, "select2-noMunicipio-container")
-        except Exception:
-            print("⚠️ Não foi possível listar municípios; avançando")
-            continue
+        if ordem_municipios_reversa:
+            municipios = municipios_por_uf.get(uf, [])
+        else:
+            try:
+                municipios = listar_opcoes_select2(ctx, "select2-noMunicipio-container")
+            except Exception:
+                print("⚠️ Não foi possível listar municípios; avançando")
+                continue
 
         for i, municipio in enumerate(municipios):
             print(f"📍 {municipio}")
