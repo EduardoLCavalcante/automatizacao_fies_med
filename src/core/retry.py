@@ -7,6 +7,7 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.support.ui import WebDriverWait
 
 from src.core.browser import BrowserContext
+from src.core.captcha import aguardar_captcha, pagina_esta_funcional
 
 T = TypeVar("T")
 
@@ -17,9 +18,7 @@ def aguardar_pagina_responsiva(ctx: BrowserContext, timeout: int = 60) -> bool:
     Retorna True se a página voltou a responder, False se continuar travada.
     """
     try:
-        WebDriverWait(ctx.driver, timeout).until(
-            lambda d: d.execute_script("return document.readyState") == "complete"
-        )
+        WebDriverWait(ctx.driver, timeout).until(lambda _driver: pagina_esta_funcional(ctx))
         return True
     except Exception:
         return False
@@ -37,7 +36,7 @@ def com_retry_timeout(
     relacionado a timeout:
 
       1. Aguarda `espera_entre_tentativas` segundos a página se recuperar sozinha.
-      2. Se não recuperar, pausa e exibe mensagem no terminal pedindo intervenção manual.
+      2. Se houver CAPTCHA pendente/expirado, aguarda a resolução humana automaticamente.
       3. Tenta novamente até `max_tentativas` vezes.
 
     NÃO recarrega a página automaticamente, pois isso exigiria novo CAPTCHA.
@@ -67,18 +66,18 @@ def com_retry_timeout(
             if not (is_timeout or is_504):
                 raise
 
-            print(f"\n⏳ Timeout/504 detectado em '{descricao}' (tentativa {tentativa}/{max_tentativas}).")
+            print(f"\nTimeout/504 detectado em '{descricao}' (tentativa {tentativa}/{max_tentativas}).")
             print(f"   Aguardando {espera_entre_tentativas}s para a página se recuperar...")
             time.sleep(espera_entre_tentativas)
 
             pagina_ok = aguardar_pagina_responsiva(ctx, timeout=30)
 
             if not pagina_ok:
-                print("\n🔴 Página não respondeu automaticamente.")
-                print("   Verifique o navegador: pode haver erro 504, CAPTCHA ou tela em branco.")
-                input("   Resolva no navegador e pressione ENTER para continuar... ")
-                time.sleep(3)
-            else:
-                print(f"   ✅ Página respondeu. Retentando '{descricao}'...")
+                print("\nPágina não respondeu automaticamente.")
+                print("   Pode haver erro 504, Cloudflare ou tela em branco; nova tentativa será feita.")
+                continue
+
+            aguardar_captcha(ctx)
+            print(f"   Página respondeu. Retentando '{descricao}'...")
 
     raise ultima_exc

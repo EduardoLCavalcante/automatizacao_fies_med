@@ -4,11 +4,21 @@ import argparse
 from typing import Sequence
 
 import src.config.settings as settings
-from src.core import build_browser, shutdown_browser
+from src.core import CaptchaError, CaptchaTimeoutError, build_browser, shutdown_browser
 from src.scraping import run_scraper, run_checker, run_review, run_faltantes_txt
 
 
-def main(argv: Sequence[str] | None = None) -> None:
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("deve ser um número inteiro positivo") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("deve ser maior que zero")
+    return parsed
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Coletor FIES")
     parser.add_argument(
         "--check",
@@ -38,6 +48,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         default=None,
         help="Executa apenas alvos de um TXT de faltantes (padrão por modalidade se omitido).",
     )
+    parser.add_argument(
+        "--captcha-timeout",
+        type=_positive_int,
+        default=settings.CAPTCHA_WAIT_TIMEOUT_SECONDS,
+        metavar="SEGUNDOS",
+        help="Tempo máximo para resolução humana do CAPTCHA (padrão: 300).",
+    )
     args = parser.parse_args(argv)
 
     modalidade = None
@@ -48,9 +65,9 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if modalidade:
         settings.FIES_MODALIDADE = modalidade
-        print(f"📋 Modalidade FIES selecionada: {modalidade.upper()}")
+        print(f"Modalidade FIES selecionada: {modalidade.upper()}")
 
-    ctx = build_browser()
+    ctx = build_browser(captcha_timeout_seconds=args.captcha_timeout)
     try:
         if args.faltantes_txt is not None:
             caminho_faltantes = args.faltantes_txt or None
@@ -61,9 +78,16 @@ def main(argv: Sequence[str] | None = None) -> None:
             run_checker(ctx)
         else:
             run_scraper(ctx)
+    except CaptchaTimeoutError as exc:
+        print(f"CAPTCHA_TIMEOUT: {exc}")
+        return 2
+    except CaptchaError as exc:
+        print(f"ERRO_PORTAL: {exc}")
+        return 1
     finally:
         shutdown_browser(ctx)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
