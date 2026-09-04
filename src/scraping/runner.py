@@ -26,8 +26,10 @@ from src.config import ESTADOS
 from src.core import (
     BrowserContext,
     CaptchaError,
+    PortalRequestTimeout,
     aguardar_captcha,
     com_retry_timeout,
+    emitir_aviso_tracker_indisponivel,
     human_delay,
     normalizar_decimal_pt,
     propagar_timeout,
@@ -40,6 +42,7 @@ from src.navigation import (
 )
 from src.scraping.extract import extrair_nota_enem_de_linha
 from src.scraping.table import (
+    _assinatura_tabela,
     obter_ultima_linha_pre_selecionado,
     selecionar_categoria,
 )
@@ -47,6 +50,19 @@ from src.scraping.table import (
 
 _IES_CODIGO_RE = re.compile(r"\((\d{4,})\)\s*$")
 _T = TypeVar("_T")
+
+
+def _assinatura_resultados_segura(driver) -> tuple[str, ...]:
+    """Lê a assinatura do resultado sem quebrar doubles de integração."""
+
+    if driver is None or not hasattr(driver, "find_elements"):
+        return ()
+    try:
+        return _assinatura_tabela(driver)
+    except TypeError:
+        # Mock/driver parcial sem coleção iterável: o caminho de espera
+        # tradicional continua sendo usado pelo chamador.
+        return ()
 
 
 def _executar_com_pausa(
@@ -312,21 +328,7 @@ def _coletar_notas_ies_review(
         propagar_timeout(exc)
         conceito_valor = None
 
-    try:
-        botao_pesquisar = ctx.wait.until(
-            EC.element_to_be_clickable((By.ID, "btnBuscarCursos"))
-        )
-    except TimeoutException:
-        try:
-            botao_pesquisar = ctx.wait.until(
-                EC.element_to_be_clickable(
-                    (By.XPATH, "//input[@id='btnBuscarCursos' or (@type='button' and @value='Pesquisar')]")
-                )
-            )
-        except TimeoutException:
-            raise
-    aguardar_captcha(ctx)
-    botao_pesquisar.click()
+    _pesquisar_e_aguardar(ctx)
 
     categorias = [
         ("Ampla", 1, "nota_enem_ultimo_ampla"),
@@ -336,21 +338,23 @@ def _coletar_notas_ies_review(
     enem_por_categoria: Dict[str, Optional[str]] = {}
     for label, codigo, chave in categorias:
         nota_cat = None
-        for _ in range(2):
-            ok = selecionar_categoria(ctx, tipo_label=label, tipo_codigo=codigo)
-            if not ok:
-                continue
-            ultima_cat = obter_ultima_linha_pre_selecionado(ctx)
-            if not ultima_cat:
-                continue
+        for tent in range(2):
             try:
-                nota_enem = extrair_nota_enem_de_linha(ctx, ultima_cat)
+                nota_enem = _executar_com_pausa(
+                    ctx,
+                    operacao=lambda: _ler_nota_categoria(ctx, label, codigo),
+                    descricao=f"categoria/tabela/nota {label} da IES '{ies_nome}'",
+                )
                 nota_cat = normalizar_decimal_pt(nota_enem) if nota_enem else None
+            except CaptchaError:
+                raise
             except Exception as exc:
                 propagar_timeout(exc)
                 nota_cat = None
             if nota_cat is not None:
                 break
+            if tent == 0:
+                human_delay(ctx.fast_mode, 0.2, 0.4)
         enem_por_categoria[chave] = nota_cat
 
     tem_dado = any(
@@ -390,14 +394,68 @@ def _pesquisar_e_aguardar(ctx: BrowserContext) -> None:
                 (By.XPATH, "//input[@id='btnBuscarCursos' or (@type='button' and @value='Pesquisar')]")
             )
         )
+    driver = getattr(ctx, "driver", None)
+    possui_dom = driver is not None and hasattr(driver, "find_elements")
+    assinatura_antes = _assinatura_resultados_segura(driver) if possui_dom else ()
+    tracker = getattr(ctx, "network", None)
+
     aguardar_captcha(ctx)
+    operacao_rede = tracker.begin(driver) if tracker is not None and possui_dom else None
     botao_pesquisar.click()
-    ctx.wait.until(EC.presence_of_element_located((By.XPATH, "//table/tbody/tr")))
+
+    # Alguns testes/integrações fornecem apenas WebDriverWait. Preservamos o
+    # caminho original quando não há DOM observável, enquanto o Chrome real
+    # usa a correlação de rede + assinatura textual da tabela.
+    if not possui_dom:
+        ctx.wait.until(EC.presence_of_element_located((By.XPATH, "//table/tbody/tr")))
+        return
+
+    ultimo_snapshot = None
+
+    def resultados_prontos(_driver) -> bool:
+        nonlocal ultimo_snapshot
+        if tracker is not None and operacao_rede is not None:
+            ultimo_snapshot = tracker.snapshot(driver, operacao_rede)
+            if ultimo_snapshot.has_busy:
+                raise PortalRequestTimeout(
+                    f"requisição da pesquisa falhou: {ultimo_snapshot.description}"
+                )
+            if ultimo_snapshot.pending:
+                return False
+        assinatura_atual = _assinatura_resultados_segura(driver)
+        return bool(assinatura_atual) and (
+            not assinatura_antes or assinatura_atual != assinatura_antes
+        )
+
+    try:
+        WebDriverWait(driver, 60 if not getattr(ctx, "fast_mode", True) else 25).until(resultados_prontos)
+    except PortalRequestTimeout:
+        raise
+    except TimeoutException:
+        if tracker is not None and operacao_rede is not None:
+            ultimo_snapshot = tracker.snapshot(driver, operacao_rede)
+            if ultimo_snapshot.has_busy:
+                raise PortalRequestTimeout(
+                    f"requisição da pesquisa falhou: {ultimo_snapshot.description}"
+                )
+            if ultimo_snapshot.pending:
+                raise PortalRequestTimeout(
+                    f"requisição da pesquisa não terminou: {ultimo_snapshot.description}"
+                )
+            if not ultimo_snapshot.available:
+                emitir_aviso_tracker_indisponivel(ctx)
+        # Um DOM preenchido é uma pós-condição suficiente quando o driver não
+        # expõe logs de performance; uma requisição 2xx sem essa pós-condição
+        # não é promovida a CAPTCHA/timeout de servidor automaticamente.
+        assinatura_atual = _assinatura_resultados_segura(driver)
+        if assinatura_atual and (not assinatura_antes or assinatura_atual != assinatura_antes):
+            return
+        raise
 
 
 def _pesquisa_concluida(ctx: BrowserContext) -> bool:
     try:
-        return bool(ctx.driver.find_elements(By.XPATH, "//table/tbody/tr"))
+        return bool(_assinatura_resultados_segura(ctx.driver))
     except Exception as exc:
         propagar_timeout(exc)
         return False
@@ -408,7 +466,7 @@ def _nova_consulta_concluida(ctx: BrowserContext) -> bool:
 
     try:
         formulario = ctx.driver.find_elements(By.ID, "select2-noEstado-container")
-        resultados = ctx.driver.find_elements(By.XPATH, "//table/tbody/tr")
+        resultados = _assinatura_resultados_segura(ctx.driver)
         return bool(formulario) and not bool(resultados)
     except Exception as exc:
         propagar_timeout(exc)
@@ -428,8 +486,11 @@ def _ler_nota_categoria(
 ) -> Optional[str]:
     """Reaplica a categoria e obtém uma linha nova após qualquer recarga."""
 
-    if not selecionar_categoria(ctx, tipo_label=label, tipo_codigo=codigo):
-        return None
+    # A tabela inicial já corresponde à categoria Ampla. Reclicar no botão
+    # gera uma resposta idêntica e não deve ser usado como sinal de progresso.
+    if label != "Ampla":
+        if not selecionar_categoria(ctx, tipo_label=label, tipo_codigo=codigo):
+            return None
     ultima_linha = obter_ultima_linha_pre_selecionado(ctx)
     if not ultima_linha:
         return None
@@ -646,6 +707,8 @@ def buscar_notas_por_municipio(
                         operacao=lambda: _ler_nota_categoria(ctx, label, codigo),
                         descricao=f"categoria/tabela/nota {label} da IES '{ies}'",
                     )
+                except CaptchaError:
+                    raise
                 except Exception as exc:
                     propagar_timeout(exc)
                     nota_enem = None

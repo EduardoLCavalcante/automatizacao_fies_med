@@ -19,6 +19,13 @@ from .captcha import (
 )
 from .utils import human_delay, normalizar_decimal_pt
 from .retry import com_retry_timeout, eh_timeout_recuperavel, propagar_timeout
+from .network import (
+    NetworkOperation,
+    NetworkSnapshot,
+    NetworkTracker,
+    PortalRequestTimeout,
+    emitir_aviso_tracker_indisponivel,
+)
 
 __all__ = [
     "BrowserContext",
@@ -41,4 +48,9 @@ __all__ = [
     "com_retry_timeout",
     "eh_timeout_recuperavel",
     "propagar_timeout",
+    "NetworkOperation",
+    "NetworkSnapshot",
+    "NetworkTracker",
+    "PortalRequestTimeout",
+    "emitir_aviso_tracker_indisponivel",
 ]

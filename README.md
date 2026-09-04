@@ -9,6 +9,7 @@ Scraper automatizado (Selenium) que percorre os estados e municípios no portal 
 - **CAPTCHA:** A resolução continua humana. O ENTER é usado somente no checkpoint inicial do Cloudflare; os CAPTCHAs seguintes são detectados automaticamente, inclusive quando expiram.
 - **Persistência incremental:** Escreve/atualiza o arquivo CSV a cada município processado.
 - **Tratamento de timeout/504:** Três tentativas rápidas e, se o portal continuar sobrecarregado, pausa automática com reconstrução completa da consulta.
+- **Diagnóstico por requisição:** O Chrome rastreia apenas eventos resumidos de Document/XHR/Fetch do portal (sem cookies, headers, payloads ou tokens) e combina o status HTTP com a mudança real da tabela.
 - **Robustez contra StaleElement:** Retry automático para elementos DOM que são re-renderizados durante navegação.
 - **Registro de falhas:** IES que não puderem ser selecionadas por motivo funcional são registradas em `notas_fies_medicina_falhas.csv` para revisão posterior; sobrecarga não gera esse registro.
 
@@ -101,6 +102,9 @@ python main.py --faltantes-txt --modalidade regular
 - Se o servidor continuar indisponível, um novo ciclo de três tentativas e pausa começa sem limite e sem solicitar ENTER. A execução só avança quando a operação atual tiver sucesso ou o operador usar `Ctrl+C`.
 - Antes de repetir um clique de pesquisa ou “Nova Consulta”, a automação verifica se a resposta anterior chegou atrasada, evitando clique ou gravação duplicada.
 - O Cloudflare inicial possui um checkpoint humano por ENTER; ocorrências posteriores não são confundidas com CAPTCHA resolvido e seguem o fluxo de retry.
+- A identificação de sobrecarga usa o rastreio de rede do Chrome DevTools Protocol: respostas HTTP 504/5xx, falhas de conexão e requisições pendentes são timeouts de servidor; uma tabela válida sem erro de rede não é pausada como se fosse 504.
+- A validação da tabela compara o conteúdo, e não apenas a quantidade de linhas. A categoria inicial **Ampla** é lida diretamente, sem um segundo clique que poderia gerar um falso timeout.
+- Se o driver não disponibilizar o log de performance, o programa informa o fallback e continua usando a pós-condição do DOM.
 
 ## Saída (CSV)
 ### Arquivo principal
@@ -197,6 +201,7 @@ Ele não pesquisa nem grava dados e compara os hashes dos CSV/TXT oficiais antes
 - Núcleo: 
   - [src/core/browser.py](src/core/browser.py) (WebDriver)
   - [src/core/captcha.py](src/core/captcha.py) (estados, detecção, expiração e espera do CAPTCHA)
+  - [src/core/network.py](src/core/network.py) (rastreio resumido de requisições e classificação de 504/timeouts)
   - [src/core/utils.py](src/core/utils.py) (delays/normalização)
   - [src/core/retry.py](src/core/retry.py) (retry inteligente para timeout/504)
   - Reexportados por [src/core/__init__.py](src/core/__init__.py).

@@ -8,6 +8,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 from src.config import CAPTCHA_WAIT_TIMEOUT_SECONDS, FAST_MODE, SERVER_BUSY_PAUSE_SECONDS
 from src.core.captcha import CaptchaMonitor
+from src.core.network import NetworkTracker
 
 
 @dataclass
@@ -47,6 +48,7 @@ class BrowserContext:
     cloudflare_checkpoint_completed: bool = False
     server_pause_seconds: float = SERVER_BUSY_PAUSE_SECONDS
     checkpoint: PortalCheckpoint = field(default_factory=PortalCheckpoint)
+    network: NetworkTracker = field(default_factory=NetworkTracker)
 
 
 def build_browser(
@@ -57,6 +59,7 @@ def build_browser(
     options = webdriver.ChromeOptions()
     options.add_argument("--start-maximized")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
     options.page_load_strategy = "none" if FAST_MODE else "normal"
 
     driver = webdriver.Chrome(
@@ -64,12 +67,15 @@ def build_browser(
         options=options,
     )
     wait = WebDriverWait(driver, 25 if FAST_MODE else 60)
+    network = NetworkTracker()
+    network.enable(driver)
     return BrowserContext(
         driver=driver,
         wait=wait,
         fast_mode=FAST_MODE,
         captcha_timeout_seconds=captcha_timeout_seconds,
         server_pause_seconds=server_pause_seconds,
+        network=network,
     )
 
 

@@ -8,7 +8,38 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
 
-from src.core import BrowserContext, human_delay, propagar_timeout
+from src.core import (
+    BrowserContext,
+    PortalRequestTimeout,
+    emitir_aviso_tracker_indisponivel,
+    human_delay,
+    propagar_timeout,
+)
+
+
+_RESULT_ROWS_XPATH = "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr"
+
+
+def _assinatura_tabela(driver) -> tuple[str, ...]:
+    """Assinatura textual para detectar atualização mesmo com a mesma contagem."""
+
+    linhas = driver.find_elements(By.XPATH, _RESULT_ROWS_XPATH)
+    return tuple((linha.text or "").strip() for linha in linhas)
+
+
+def _categoria_ativa(botao) -> bool:
+    try:
+        classe = (botao.get_attribute("class") or "").lower()
+        aria = (botao.get_attribute("aria-pressed") or "").lower()
+        estado = (botao.get_attribute("data-active") or "").lower()
+        return (
+            aria == "true"
+            or estado in {"true", "1", "active", "selected"}
+            or any(token in classe.split() for token in ("active", "selected"))
+        )
+    except Exception as exc:
+        propagar_timeout(exc)
+        return False
 
 
 def expandir_todos_candidatos(ctx: BrowserContext) -> None:
@@ -164,11 +195,10 @@ def selecionar_categoria(ctx: BrowserContext, tipo_label: Optional[str] = None, 
         alvos.append((By.XPATH, f"//button[contains(normalize-space(.), '{tipo_label}')]") )
 
     try:
-        linhas_antes = driver.find_elements(By.XPATH, "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr")
-        qtd_antes = len(linhas_antes)
+        assinatura_antes = _assinatura_tabela(driver)
     except Exception as exc:
         propagar_timeout(exc)
-        qtd_antes = 0
+        assinatura_antes = ()
 
     btn = None
     ultimo_timeout = None
@@ -187,6 +217,15 @@ def selecionar_categoria(ctx: BrowserContext, tipo_label: Optional[str] = None, 
             raise ultimo_timeout
         return False
 
+    # Alguns portais deixam a categoria inicial marcada. Clicar de novo nesse
+    # botão não produz uma nova resposta e fazia o código confundir uma tabela
+    # válida com timeout.
+    if _categoria_ativa(btn):
+        return True
+
+    tracker = getattr(ctx, "network", None)
+    operacao_rede = tracker.begin(driver) if tracker is not None else None
+
     try:
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
     except Exception as exc:
@@ -202,10 +241,53 @@ def selecionar_categoria(ctx: BrowserContext, tipo_label: Optional[str] = None, 
             propagar_timeout(fallback_exc)
             return False
 
+    ultimo_snapshot = None
+
+    def tabela_atualizada(_driver) -> bool:
+        nonlocal ultimo_snapshot
+        if tracker is not None and operacao_rede is not None:
+            ultimo_snapshot = tracker.snapshot(driver, operacao_rede)
+            if ultimo_snapshot.has_busy:
+                raise PortalRequestTimeout(
+                    f"requisição da categoria falhou: {ultimo_snapshot.description}"
+                )
+            # Não considerar o DOM pronto enquanto a requisição ainda está em
+            # andamento: uma resposta antiga pode continuar visível.
+            if ultimo_snapshot.pending:
+                return False
+
+        assinatura_atual = _assinatura_tabela(driver)
+        if _categoria_ativa(btn):
+            return True
+        return bool(assinatura_atual) and assinatura_atual != assinatura_antes
+
     try:
-        WebDriverWait(driver, 8).until(
-            lambda d: len(d.find_elements(By.XPATH, "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr")) != qtd_antes
-        )
-    except TimeoutException:
+        WebDriverWait(driver, 8).until(tabela_atualizada)
+        return True
+    except PortalRequestTimeout:
         raise
-    return True
+    except TimeoutException:
+        if tracker is not None and operacao_rede is not None:
+            ultimo_snapshot = tracker.snapshot(driver, operacao_rede)
+            if ultimo_snapshot.has_busy:
+                raise PortalRequestTimeout(
+                    f"requisição da categoria falhou: {ultimo_snapshot.description}"
+                )
+            if ultimo_snapshot.pending:
+                raise PortalRequestTimeout(
+                    f"requisição da categoria não terminou: {ultimo_snapshot.description}"
+                )
+            if not ultimo_snapshot.available:
+                emitir_aviso_tracker_indisponivel(ctx)
+            # HTTP 2xx sem atualização do resultado é uma falha local de
+            # validação; o chamador pode tentar novamente sem iniciar pausa de
+            # servidor. O mesmo vale para ausência de categoria ativa quando
+            # há uma tabela antiga, já que não houve erro de rede confirmado.
+            if ultimo_snapshot.has_success and _assinatura_tabela(driver):
+                return False
+
+        # Sem rede e sem tabela não há pós-condição válida para a operação;
+        # propaga o timeout para o controlador central.
+        if not _assinatura_tabela(driver):
+            raise
+        return False
