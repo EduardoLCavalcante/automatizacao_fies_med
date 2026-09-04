@@ -5,7 +5,14 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
 import src.config.settings as settings
-from src.core import BrowserContext, human_delay, remove_loading_overlay
+from src.core import (
+    BrowserContext,
+    PortalStateError,
+    aguardar_cloudflare_inicial,
+    aguardar_captcha,
+    human_delay,
+    remove_loading_overlay,
+)
 from src.config import BASE_URL
 from src.actions import (
     select2,
@@ -17,16 +24,22 @@ from src.actions import (
 )
 
 
+def _aguardar_formulario(ctx: BrowserContext) -> None:
+    try:
+        ctx.wait.until(EC.presence_of_element_located((By.ID, "select2-noEstado-container")))
+    except TimeoutException as exc:
+        raise PortalStateError("formulário de consulta não ficou disponível") from exc
+
+
 def preparar_primeira_pagina(ctx: BrowserContext) -> None:
-    driver, wait = ctx.driver, ctx.wait
+    driver = ctx.driver
+    ctx.captcha.reset()
     driver.get(BASE_URL)
     remove_loading_overlay(ctx)
-    print("⚠️ Resolva o CAPTCHA e pressione ENTER para continuar...")
-    input()
-    try:
-        wait.until(EC.presence_of_element_located((By.ID, "select2-noEstado-container")))
-    except TimeoutException:
-        pass
+    aguardar_cloudflare_inicial(ctx)
+    aguardar_captcha(ctx)
+    remove_loading_overlay(ctx)
+    _aguardar_formulario(ctx)
 
 
 def abrir_nova_consulta(ctx: BrowserContext) -> bool:
@@ -42,19 +55,11 @@ def abrir_nova_consulta(ctx: BrowserContext) -> bool:
     except TimeoutException:
         return False
 
+    ctx.captcha.reset()
     remove_loading_overlay(ctx)
-    try:
-        wait.until(EC.presence_of_element_located((By.ID, "select2-noEstado-container")))
-    except TimeoutException:
-        pass
-
-    print("⚠️ Resolva o CAPTCHA e pressione ENTER para continuar...")
-    input()
+    aguardar_captcha(ctx)
     remove_loading_overlay(ctx)
-    try:
-        wait.until(EC.presence_of_element_located((By.ID, "select2-noEstado-container")))
-    except TimeoutException:
-        pass
+    _aguardar_formulario(ctx)
     return True
 
 

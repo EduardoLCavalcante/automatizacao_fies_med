@@ -24,7 +24,14 @@ from src.actions import (
     esperar_select2_habilitado,
 )
 from src.config import CSV_COLUMNS, ESTADOS
-from src.core import BrowserContext, human_delay, normalizar_decimal_pt, com_retry_timeout
+from src.core import (
+    BrowserContext,
+    CaptchaError,
+    aguardar_captcha,
+    com_retry_timeout,
+    human_delay,
+    normalizar_decimal_pt,
+)
 from src.navigation import abrir_nova_consulta, aplicar_filtros, preparar_primeira_pagina
 from src.scraping.extract import extrair_nota_enem_de_linha
 from src.scraping.table import (
@@ -280,16 +287,20 @@ def _coletar_notas_ies_review(
         conceito_valor = None
 
     try:
-        ctx.wait.until(EC.element_to_be_clickable((By.ID, "btnBuscarCursos"))).click()
+        botao_pesquisar = ctx.wait.until(
+            EC.element_to_be_clickable((By.ID, "btnBuscarCursos"))
+        )
     except TimeoutException:
         try:
-            ctx.wait.until(
+            botao_pesquisar = ctx.wait.until(
                 EC.element_to_be_clickable(
                     (By.XPATH, "//input[@id='btnBuscarCursos' or (@type='button' and @value='Pesquisar')]")
                 )
-            ).click()
+            )
         except TimeoutException:
             return None
+    aguardar_captcha(ctx)
+    botao_pesquisar.click()
 
     categorias = [
         ("Ampla", 1, "nota_enem_ultimo_ampla"),
@@ -341,13 +352,17 @@ def _coletar_notas_ies_review(
 def _pesquisar_e_aguardar(ctx: BrowserContext) -> None:
     """Clica em Pesquisar e aguarda a tabela de resultados aparecer."""
     try:
-        ctx.wait.until(EC.element_to_be_clickable((By.ID, "btnBuscarCursos"))).click()
+        botao_pesquisar = ctx.wait.until(
+            EC.element_to_be_clickable((By.ID, "btnBuscarCursos"))
+        )
     except TimeoutException:
-        ctx.wait.until(
+        botao_pesquisar = ctx.wait.until(
             EC.element_to_be_clickable(
                 (By.XPATH, "//input[@id='btnBuscarCursos' or (@type='button' and @value='Pesquisar')]")
             )
-        ).click()
+        )
+    aguardar_captcha(ctx)
+    botao_pesquisar.click()
     ctx.wait.until(EC.presence_of_element_located((By.XPATH, "//table/tbody/tr")))
 
 
@@ -818,6 +833,8 @@ def run_scraper(
                     ies_por_mun.setdefault((uf, municipio), set()).add(_norm_label(r.get("ies", "")))
                     if on_registro_salvo:
                         on_registro_salvo(r)
+            except CaptchaError:
+                raise
             except Exception:
                 pesquisou = False
 

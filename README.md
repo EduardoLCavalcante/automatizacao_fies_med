@@ -6,7 +6,7 @@ Scraper automatizado (Selenium) que percorre os estados e municípios no portal 
 - **Navegação automatizada:** Usa Selenium + Chrome para interagir com filtros (Estado, Município, Curso, IES, Conceito).
 - **Curso alvo:** Seleção exata de "MEDICINA" (evita confusão com Biomedicina).
 - **Categorias:** Coleta notas por categoria (Ampla, PPIQ, PCD) e a nota do último Pré-Selecionado na lista atual.
-- **CAPTCHA:** Requer intervenção humana quando solicitado; o script pausa e aguarda confirmação no terminal.
+- **CAPTCHA:** A resolução continua humana, mas o script detecta automaticamente conclusão e expiração, sem exigir ENTER.
 - **Persistência incremental:** Escreve/atualiza o arquivo CSV a cada município processado.
 - **Tratamento de timeout/504:** Sistema inteligente de retry que aguarda recuperação da página sem recarregar (preservando sessão e CAPTCHA).
 - **Robustez contra StaleElement:** Retry automático para elementos DOM que são re-renderizados durante navegação.
@@ -45,7 +45,10 @@ python main.py
 ```
 Durante a execução:
 - Uma janela do Chrome será aberta em [main.py](main.py) e o site do FIES será carregado.
-- Quando o CAPTCHA aparecer, o terminal mostrará a mensagem "Resolva o CAPTCHA e pressione ENTER". Resolva-o no navegador e pressione ENTER no terminal para continuar.
+- Se o Cloudflare bloquear o acesso inicial — inclusive quando surgir após um F5 durante a espera do primeiro CAPTCHA — conclua a verificação no navegador e pressione ENTER quando a página for liberada.
+- A partir do CAPTCHA do portal, resolva o desafio no navegador. O script identifica o token automaticamente e continua sem novas confirmações no terminal.
+- Cada intervenção tem limite padrão de 300 segundos. Use `--captcha-timeout SEGUNDOS` para configurar outro inteiro positivo.
+- Se o limite expirar, o processo encerra com código `2`, fecha o Chrome e preserva o progresso já gravado.
 - O script iterará por todos os estados e seus municípios, selecionando o curso de Medicina e as IES disponíveis.
 - O arquivo de saída [notas_fies_medicina.csv](notas_fies_medicina.csv) é atualizado continuamente (encoding UTF-8 com BOM para fácil abertura no Excel).
 
@@ -88,11 +91,12 @@ python main.py --faltantes-txt notas_fies_medicina_faltantes.txt
 python main.py --faltantes-txt --modalidade regular
 ```
 
-### Comportamento em caso de timeout/erro 504
+### Comportamento em caso de CAPTCHA, timeout ou erro 504
+- O CAPTCHA é verificado no início, após "Nova Consulta", antes de "Pesquisar" e durante a recuperação de falhas.
+- Se um token já resolvido expirar, o terminal informa a expiração e volta a aguardar uma nova resolução humana.
 - Quando a API do portal demorar muito ou retornar erro 504, o script **não recarrega a página** (para preservar a sessão e evitar novo CAPTCHA).
 - O sistema aguarda automaticamente 15 segundos para a página se recuperar sozinha.
-- Se a página não responder, o terminal exibirá uma mensagem pedindo intervenção manual: "Verifique o navegador: pode haver erro 504, CAPTCHA ou tela em branco."
-- Resolva o problema no navegador (se necessário) e pressione ENTER para continuar.
+- O Cloudflare inicial possui um checkpoint humano por ENTER; ocorrências posteriores não são confundidas com CAPTCHA resolvido e seguem o fluxo de retry.
 - Após 3 tentativas sem sucesso, a IES é registrada em `notas_fies_medicina_falhas.csv` e o script continua com a próxima.
 
 ## Saída (CSV)
@@ -125,6 +129,7 @@ Observações:
 ## Configurações Úteis
 No início de [src/config/settings.py](src/config/settings.py):
 - **`FAST_MODE`**: acelera interações e reduz esperas. Útil para evitar expiração de sessão; se notar instabilidade, defina como `False`.
+- **`CAPTCHA_WAIT_TIMEOUT_SECONDS`**: limite padrão por intervenção humana, em segundos (`300`). Pode ser sobrescrito por `--captcha-timeout`.
 - **`FIES_MODALIDADE`**: define a modalidade padrão (`"social"` ou `"regular"`). Pode ser sobrescrito pela flag `--modalidade` na linha de comando.
 
 ## Dicas de Uso
@@ -139,13 +144,15 @@ O scraper implementa um mecanismo robusto de tratamento de erros quando o portal
 
 - **Preservação de sessão:** Nunca recarrega a página automaticamente, evitando perda de sessão e novo CAPTCHA.
 - **Recuperação automática:** Aguarda até 15 segundos para a página se recuperar sozinha.
-- **Intervenção assistida:** Se a página não responder, pausa e solicita verificação manual no terminal.
+- **CAPTCHA assistido:** Após o checkpoint inicial do Cloudflare, detecta token pendente, resolvido ou expirado sem novos `input()`.
+- **Estados separados:** 504, Cloudflare e página em branco não são tratados como CAPTCHA.
 - **Retry configurável:** Até 3 tentativas antes de registrar falha e continuar.
 - **Registro de falhas:** IES problemáticas são salvas em `notas_fies_medicina_falhas.csv` com motivo detalhado.
 
 Implementado em `src/core/retry.py` com as funções:
 - `aguardar_pagina_responsiva()`: Verifica se a página saiu do estado de loading
 - `com_retry_timeout()`: Wrapper genérico de retry para operações sujeitas a timeout
+- `aguardar_captcha()`: Aguarda a resolução humana e detecta expiração automaticamente
 
 ### Tratamento de StaleElementReferenceException
 Elementos DOM que são destruídos e recriados durante navegação (especialmente Select2 de municípios ao trocar de estado) agora têm retry automático:
@@ -166,12 +173,26 @@ ESTADOS = {
 }
 ```
 
+### Testes do monitor de CAPTCHA
+Execute a suíte determinística, sem abrir o portal:
+```powershell
+python -B -m unittest discover -s tests -v
+```
+
+O smoke test real é opt-in e exige que o operador resolva o CAPTCHA no Chrome visível:
+```powershell
+$env:FIES_CAPTCHA_SMOKE = "1"
+python -B -m unittest discover -s tests -p test_captcha_smoke.py -v
+```
+Ele não pesquisa nem grava dados e compara os hashes dos CSV/TXT oficiais antes e depois.
+
 ## Estrutura do Projeto
 - [main.py](main.py): ponto de entrada que recebe argumentos CLI e chama a automação.
-- [src/app.py](src/app.py): orquestração do fluxo principal e parser de argumentos (--modalidade, --check, --review, --fies-regular).
+- [src/app.py](src/app.py): orquestração do fluxo principal e parser de argumentos (--modalidade, --check, --review, --fies-regular, --captcha-timeout).
 - Configuração: [src/config/settings.py](src/config/settings.py) (FAST_MODE, FIES_MODALIDADE, BASE_URL, colunas), [src/config/estados.py](src/config/estados.py) (mapa UF → nome), reexportados por [src/config/__init__.py](src/config/__init__.py).
 - Núcleo: 
   - [src/core/browser.py](src/core/browser.py) (WebDriver)
+  - [src/core/captcha.py](src/core/captcha.py) (estados, detecção, expiração e espera do CAPTCHA)
   - [src/core/utils.py](src/core/utils.py) (delays/normalização)
   - [src/core/retry.py](src/core/retry.py) (retry inteligente para timeout/504)
   - Reexportados por [src/core/__init__.py](src/core/__init__.py).
@@ -186,7 +207,7 @@ ESTADOS = {
 
 ## Solução de Problemas
 - **Chrome/Driver:** `webdriver-manager` baixa o driver automaticamente; garanta que o Google Chrome esteja instalado e atualizado.
-- **CAPTCHA constante:** O site pode impor verificações; responda quando solicitado. Se ocorrer com muita frequência, tente executar em horários diferentes ou reduzir o ritmo (desative `FAST_MODE`).
+- **CAPTCHA constante:** O site pode impor verificações; resolva-as no Chrome visível. A automação não resolve nem contorna o desafio. Se o limite configurado expirar, ela encerra com código `2`.
 - **Timeout/504 frequente:** O portal pode ficar lento em horários de pico. O script aguarda automaticamente recuperação, mas se persistir, revise `notas_fies_medicina_falhas.csv` e tente novamente mais tarde.
 - **StaleElementReferenceException:** Já tratado automaticamente com retry (até 3 tentativas). Se ainda ocorrer, pode indicar mudanças no layout do site.
 - **Mudanças no site:** Seletores podem quebrar se o layout mudar. Ajuste os seletores no código conforme necessário.
