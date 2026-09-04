@@ -1,4 +1,10 @@
-from .browser import BrowserContext, build_browser, shutdown_browser, remove_loading_overlay
+from .browser import (
+    BrowserContext,
+    PortalCheckpoint,
+    build_browser,
+    shutdown_browser,
+    remove_loading_overlay,
+)
 from .captcha import (
     CaptchaError,
     CaptchaMonitor,
@@ -12,10 +18,11 @@ from .captcha import (
     pagina_esta_funcional,
 )
 from .utils import human_delay, normalizar_decimal_pt
-from .retry import com_retry_timeout
+from .retry import com_retry_timeout, eh_timeout_recuperavel, propagar_timeout
 
 __all__ = [
     "BrowserContext",
+    "PortalCheckpoint",
     "build_browser",
     "shutdown_browser",
     "remove_loading_overlay",
@@ -32,4 +39,6 @@ __all__ = [
     "human_delay",
     "normalizar_decimal_pt",
     "com_retry_timeout",
+    "eh_timeout_recuperavel",
+    "propagar_timeout",
 ]

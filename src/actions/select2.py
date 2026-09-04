@@ -10,7 +10,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.support.ui import WebDriverWait
 
-from src.core import BrowserContext, human_delay
+from src.core import BrowserContext, human_delay, propagar_timeout
 
 
 def esperar_select2_habilitado(ctx: BrowserContext, container_id: str, timeout: int | None = None):
@@ -159,7 +159,8 @@ def curso_existe(ctx: BrowserContext, nome_curso: str) -> bool:
 
         driver.find_element(By.TAG_NAME, "body").click()
         return existe
-    except Exception:
+    except Exception as exc:
+        propagar_timeout(exc)
         driver.find_element(By.TAG_NAME, "body").click()
         return False
 
@@ -249,11 +250,13 @@ def select2_pick_first(ctx: BrowserContext, container_id: str) -> bool:
             alvo.click()
             driver.find_element(By.TAG_NAME, "body").click()
             return True
-    except Exception:
+    except Exception as exc:
+        propagar_timeout(exc)
         pass
     try:
         driver.find_element(By.TAG_NAME, "body").click()
-    except Exception:
+    except Exception as exc:
+        propagar_timeout(exc)
         pass
     return False
 
@@ -268,7 +271,8 @@ def _verify_select2_selected(ctx: BrowserContext, container_id: str, expected_te
             )
         )
         return True
-    except Exception:
+    except Exception as exc:
+        propagar_timeout(exc)
         return False
 
 
@@ -314,7 +318,8 @@ def select2_exact_multi(ctx: BrowserContext, container_ids: Iterable[str], texto
             select2_exact(ctx, cid, texto)
             if _verify_select2_selected(ctx, cid, texto):
                 return True
-        except Exception:
+        except Exception as exc:
+            propagar_timeout(exc)
             pass
 
         # fallback: busca tolerante por aproximação contendo o texto normalizado
@@ -366,11 +371,13 @@ def select2_exact_multi(ctx: BrowserContext, container_ids: Iterable[str], texto
                 candidato.click()
                 ctx.driver.find_element(By.TAG_NAME, "body").click()
                 return _verify_select2_selected(ctx, cid, candidato.text)
-        except Exception:
+        except Exception as exc:
+            propagar_timeout(exc)
             pass
         try:
             ctx.driver.find_element(By.TAG_NAME, "body").click()
-        except Exception:
+        except Exception as exc:
+            propagar_timeout(exc)
             pass
     return False
 
@@ -385,6 +392,7 @@ def listar_opcoes_select2_multi(ctx: BrowserContext, container_ids: Iterable[str
             op2 = listar_opcoes_select2(ctx, cid)
             if op2:
                 return op2
-        except Exception:
+        except Exception as exc:
+            propagar_timeout(exc)
             continue
     return []

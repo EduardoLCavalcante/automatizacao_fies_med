@@ -6,8 +6,35 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
-from src.config import CAPTCHA_WAIT_TIMEOUT_SECONDS, FAST_MODE
+from src.config import CAPTCHA_WAIT_TIMEOUT_SECONDS, FAST_MODE, SERVER_BUSY_PAUSE_SECONDS
 from src.core.captcha import CaptchaMonitor
+
+
+@dataclass
+class PortalCheckpoint:
+    """Estado lógico mínimo necessário para reconstruir a consulta atual."""
+
+    mode: str = "normal"
+    modalidade: str = "social"
+    fase: str = "inicio"
+    estado: str | None = None
+    municipio: str | None = None
+    curso: str | None = None
+    ies_nome: str | None = None
+    ies_codigo: str | None = None
+    conceito: str | None = None
+
+    def limpar_apos_estado(self) -> None:
+        self.municipio = None
+        self.curso = None
+        self.ies_nome = None
+        self.ies_codigo = None
+        self.conceito = None
+
+    def limpar_apos_municipio(self) -> None:
+        self.ies_nome = None
+        self.ies_codigo = None
+        self.conceito = None
 
 
 @dataclass
@@ -18,10 +45,13 @@ class BrowserContext:
     captcha_timeout_seconds: float = CAPTCHA_WAIT_TIMEOUT_SECONDS
     captcha: CaptchaMonitor = field(default_factory=CaptchaMonitor)
     cloudflare_checkpoint_completed: bool = False
+    server_pause_seconds: float = SERVER_BUSY_PAUSE_SECONDS
+    checkpoint: PortalCheckpoint = field(default_factory=PortalCheckpoint)
 
 
 def build_browser(
     captcha_timeout_seconds: float = CAPTCHA_WAIT_TIMEOUT_SECONDS,
+    server_pause_seconds: float = SERVER_BUSY_PAUSE_SECONDS,
 ) -> BrowserContext:
     """Inicializa o Chrome com as opções adequadas ao modo escolhido."""
     options = webdriver.ChromeOptions()
@@ -39,6 +69,7 @@ def build_browser(
         wait=wait,
         fast_mode=FAST_MODE,
         captcha_timeout_seconds=captcha_timeout_seconds,
+        server_pause_seconds=server_pause_seconds,
     )
 
 

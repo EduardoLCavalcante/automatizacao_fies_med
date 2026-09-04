@@ -13,6 +13,7 @@ from src.core.captcha import (
     CaptchaTimeoutError,
     aguardar_captcha,
 )
+from src.core.browser import PortalCheckpoint
 from src.navigation.flow import abrir_nova_consulta, preparar_primeira_pagina
 from src.scraping import runner
 
@@ -56,6 +57,9 @@ class NavigationCaptchaTests(unittest.TestCase):
             captcha=CaptchaMonitor(),
             captcha_timeout_seconds=300,
             fast_mode=True,
+            server_pause_seconds=300,
+            checkpoint=PortalCheckpoint(),
+            cloudflare_checkpoint_completed=False,
         )
 
     def test_initial_page_resets_and_waits_for_captcha(self):
@@ -108,7 +112,12 @@ class NavigationCaptchaTests(unittest.TestCase):
         self.assertEqual("click", events[1])
 
     def test_runner_does_not_swallow_captcha_error_or_print_finalized(self):
-        ctx = SimpleNamespace(driver=Mock(), fast_mode=True)
+        ctx = SimpleNamespace(
+            driver=Mock(),
+            fast_mode=True,
+            server_pause_seconds=300,
+            checkpoint=PortalCheckpoint(),
+        )
         output = io.StringIO()
         with (
             patch.object(runner, "carregar_progresso", return_value=([], set(), None, {})),
@@ -131,7 +140,7 @@ class NavigationCaptchaTests(unittest.TestCase):
 
 class AppCaptchaTests(unittest.TestCase):
     def test_timeout_returns_two_and_always_closes_browser(self):
-        ctx = object()
+        ctx = SimpleNamespace(checkpoint=PortalCheckpoint())
         output = io.StringIO()
         with (
             patch("src.app.build_browser", return_value=ctx),
@@ -147,7 +156,7 @@ class AppCaptchaTests(unittest.TestCase):
         self.assertNotIn("FINALIZADO", output.getvalue())
 
     def test_timeout_option_is_forwarded_to_browser(self):
-        ctx = object()
+        ctx = SimpleNamespace(checkpoint=PortalCheckpoint())
         with (
             patch("src.app.build_browser", return_value=ctx) as build,
             patch("src.app.run_scraper"),
@@ -155,7 +164,10 @@ class AppCaptchaTests(unittest.TestCase):
         ):
             self.assertEqual(0, main(["--captcha-timeout", "17"]))
 
-        build.assert_called_once_with(captcha_timeout_seconds=17)
+        build.assert_called_once_with(
+            captcha_timeout_seconds=17,
+            server_pause_seconds=300,
+        )
 
     def test_all_modes_and_modalities_use_the_captcha_enabled_context(self):
         modes = [
@@ -186,6 +198,9 @@ class AppCaptchaTests(unittest.TestCase):
                             captcha=CaptchaMonitor(),
                             captcha_timeout_seconds=300,
                             fast_mode=True,
+                            server_pause_seconds=300,
+                            checkpoint=PortalCheckpoint(),
+                            cloudflare_checkpoint_completed=False,
                         )
                         clock = FakeClock()
 
@@ -225,6 +240,41 @@ class AppCaptchaTests(unittest.TestCase):
                 main(["--captcha-timeout", "0"])
         self.assertEqual(2, exc.exception.code)
         build.assert_not_called()
+
+    def test_server_pause_option_is_forwarded_and_must_be_positive(self):
+        ctx = SimpleNamespace(checkpoint=PortalCheckpoint())
+        with (
+            patch("src.app.build_browser", return_value=ctx) as build,
+            patch("src.app.run_scraper"),
+            patch("src.app.shutdown_browser"),
+        ):
+            self.assertEqual(0, main(["--server-pause", "41"]))
+
+        build.assert_called_once_with(
+            captcha_timeout_seconds=300,
+            server_pause_seconds=41,
+        )
+
+        with patch("src.app.build_browser") as invalid_build:
+            with self.assertRaises(SystemExit) as exc:
+                main(["--server-pause", "0"])
+        self.assertEqual(2, exc.exception.code)
+        invalid_build.assert_not_called()
+
+    def test_keyboard_interrupt_closes_browser_without_finalized_message(self):
+        ctx = SimpleNamespace(checkpoint=PortalCheckpoint())
+        output = io.StringIO()
+        with (
+            patch("src.app.build_browser", return_value=ctx),
+            patch("src.app.run_scraper", side_effect=KeyboardInterrupt),
+            patch("src.app.shutdown_browser") as shutdown,
+            redirect_stdout(output),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                main([])
+
+        shutdown.assert_called_once_with(ctx)
+        self.assertNotIn("FINALIZADO", output.getvalue())
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
 
-from src.core import BrowserContext, human_delay
+from src.core import BrowserContext, human_delay, propagar_timeout
 
 
 def expandir_todos_candidatos(ctx: BrowserContext) -> None:
@@ -20,7 +20,7 @@ def expandir_todos_candidatos(ctx: BrowserContext) -> None:
             )
         )
     except TimeoutException:
-        return
+        raise
 
     max_clicks = 500
     sem_crescimento = 0
@@ -36,7 +36,8 @@ def expandir_todos_candidatos(ctx: BrowserContext) -> None:
                 try:
                     if el.is_displayed():
                         return el
-                except Exception:
+                except Exception as exc:
+                    propagar_timeout(exc)
                     continue
         return None
 
@@ -53,17 +54,20 @@ def expandir_todos_candidatos(ctx: BrowserContext) -> None:
 
         try:
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", ver_mais_el)
-        except Exception:
+        except Exception as exc:
+            propagar_timeout(exc)
             pass
         clicked = False
         try:
             ver_mais_el.click()
             clicked = True
-        except Exception:
+        except Exception as exc:
+            propagar_timeout(exc)
             try:
                 driver.execute_script("arguments[0].click();", ver_mais_el)
                 clicked = True
-            except Exception:
+            except Exception as fallback_exc:
+                propagar_timeout(fallback_exc)
                 clicked = False
 
         if not clicked:
@@ -86,7 +90,8 @@ def expandir_todos_candidatos(ctx: BrowserContext) -> None:
             if sem_crescimento >= 2:
                 try:
                     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                except Exception:
+                except Exception as exc:
+                    propagar_timeout(exc)
                     pass
                 break
         else:
@@ -107,7 +112,7 @@ def obter_ultima_linha(ctx: BrowserContext):
             )
         )
     except TimeoutException:
-        return None
+        raise
 
     expandir_todos_candidatos(ctx)
 
@@ -124,7 +129,8 @@ def _linha_e_pre_selecionado(linha) -> bool:
             return True
         if "pré-selecionado" in (linha.text or "").lower():
             return True
-    except Exception:
+    except Exception as exc:
+        propagar_timeout(exc)
         return False
     return False
 
@@ -138,7 +144,7 @@ def obter_ultima_linha_pre_selecionado(ctx: BrowserContext):
             )
         )
     except TimeoutException:
-        return None
+        raise
 
     expandir_todos_candidatos(ctx)
 
@@ -160,32 +166,40 @@ def selecionar_categoria(ctx: BrowserContext, tipo_label: Optional[str] = None, 
     try:
         linhas_antes = driver.find_elements(By.XPATH, "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr")
         qtd_antes = len(linhas_antes)
-    except Exception:
+    except Exception as exc:
+        propagar_timeout(exc)
         qtd_antes = 0
 
     btn = None
+    ultimo_timeout = None
     for by, sel in alvos:
         try:
             el = wait.until(EC.element_to_be_clickable((by, sel)))
             if el and el.is_displayed():
                 btn = el
                 break
-        except TimeoutException:
+        except TimeoutException as exc:
+            ultimo_timeout = exc
             continue
 
     if not btn:
+        if ultimo_timeout is not None:
+            raise ultimo_timeout
         return False
 
     try:
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
-    except Exception:
+    except Exception as exc:
+        propagar_timeout(exc)
         pass
     try:
         btn.click()
-    except Exception:
+    except Exception as exc:
+        propagar_timeout(exc)
         try:
             driver.execute_script("arguments[0].click();", btn)
-        except Exception:
+        except Exception as fallback_exc:
+            propagar_timeout(fallback_exc)
             return False
 
     try:
@@ -193,5 +207,5 @@ def selecionar_categoria(ctx: BrowserContext, tipo_label: Optional[str] = None, 
             lambda d: len(d.find_elements(By.XPATH, "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr")) != qtd_antes
         )
     except TimeoutException:
-        pass
+        raise
     return True

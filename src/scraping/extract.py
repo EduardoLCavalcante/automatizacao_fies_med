@@ -3,12 +3,11 @@
 from typing import Optional
 
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
 
-from src.core import BrowserContext
+from src.core import BrowserContext, propagar_timeout
 
 
 def extrair_nota_enem_de_modal(ctx: BrowserContext) -> Optional[str]:
@@ -20,7 +19,7 @@ def extrair_nota_enem_de_modal(ctx: BrowserContext) -> Optional[str]:
             )
         )
     except TimeoutException:
-        return None
+        raise
 
     valor_span = None
     candidatos = [
@@ -28,6 +27,7 @@ def extrair_nota_enem_de_modal(ctx: BrowserContext) -> Optional[str]:
         "//span[contains(normalize-space(.), 'NOTA ENEM')]/following::span[contains(@style,'font-size')][1]",
         "//span[contains(normalize-space(.), 'NOTA ENEM')]/following::span[1]",
     ]
+    ultimo_timeout = None
     for xp in candidatos:
         try:
             valor_span = wait.until(
@@ -35,35 +35,33 @@ def extrair_nota_enem_de_modal(ctx: BrowserContext) -> Optional[str]:
             )
             if valor_span and valor_span.text.strip():
                 break
-        except TimeoutException:
+        except TimeoutException as exc:
+            ultimo_timeout = exc
             continue
+    if valor_span is None and ultimo_timeout is not None:
+        raise ultimo_timeout
     nota_texto = valor_span.text.strip() if valor_span else None
 
     try:
         btn_voltar = wait.until(EC.element_to_be_clickable((By.ID, "btnModalFechar")))
         try:
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn_voltar)
-        except Exception:
+        except Exception as exc:
+            propagar_timeout(exc)
             pass
         try:
             btn_voltar.click()
-        except Exception:
+        except Exception as exc:
+            propagar_timeout(exc)
             driver.execute_script("arguments[0].click();", btn_voltar)
         try:
             WebDriverWait(driver, 5).until(
                 EC.invisibility_of_element_located((By.ID, "btnModalFechar"))
             )
         except TimeoutException:
-            pass
+            raise
     except TimeoutException:
-        try:
-            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-        except Exception:
-            try:
-                fechar = driver.find_element(By.XPATH, "//div[contains(@class,'modal')]//button[contains(@class,'close') or contains(.,'Fechar')]")
-                driver.execute_script("arguments[0].click();", fechar)
-            except Exception:
-                pass
+        raise
     return nota_texto
 
 
@@ -74,5 +72,6 @@ def extrair_nota_enem_de_linha(ctx: BrowserContext, linha) -> Optional[str]:
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
         btn.click()
         return extrair_nota_enem_de_modal(ctx)
-    except Exception:
+    except Exception as exc:
+        propagar_timeout(exc)
         return None

@@ -2,6 +2,7 @@
 
 FAST_MODE: bool = True  # acelera a execução para evitar expiração de sessão/CAPTCHA
 CAPTCHA_WAIT_TIMEOUT_SECONDS: int = 300
+SERVER_BUSY_PAUSE_SECONDS: int = 300
 CONCEITO_ALVO = None  # reservado para uso futuro (ex.: forçar conceito específico)
 FIES_MODALIDADE: str = "social"  # "social" ou "regular"
 BASE_URL = "https://fiesselecaoaluno.mec.gov.br/consulta"

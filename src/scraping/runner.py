@@ -2,11 +2,11 @@
 
 import os
 import re
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple, TypeVar
 import unicodedata
 
 import pandas as pd
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -16,14 +16,13 @@ from src.actions import (
     curso_existe,
     listar_opcoes_select2,
     listar_opcoes_select2_multi,
-    selecionar_radio_fies_social,
     select2,
     select2_exact,
     select2_exact_multi,
     select2_pick_first,
     esperar_select2_habilitado,
 )
-from src.config import CSV_COLUMNS, ESTADOS
+from src.config import ESTADOS
 from src.core import (
     BrowserContext,
     CaptchaError,
@@ -31,17 +30,40 @@ from src.core import (
     com_retry_timeout,
     human_delay,
     normalizar_decimal_pt,
+    propagar_timeout,
 )
-from src.navigation import abrir_nova_consulta, aplicar_filtros, preparar_primeira_pagina
+from src.navigation import (
+    abrir_nova_consulta,
+    aplicar_filtros,
+    preparar_primeira_pagina,
+    restaurar_checkpoint,
+)
 from src.scraping.extract import extrair_nota_enem_de_linha
 from src.scraping.table import (
-    expandir_todos_candidatos,
     obter_ultima_linha_pre_selecionado,
     selecionar_categoria,
 )
 
 
 _IES_CODIGO_RE = re.compile(r"\((\d{4,})\)\s*$")
+_T = TypeVar("_T")
+
+
+def _executar_com_pausa(
+    ctx: BrowserContext,
+    operacao: Callable[[], _T],
+    descricao: str,
+    concluida: Callable[[], bool] | None = None,
+) -> _T:
+    """Executa uma operação do portal com recuperação pelo checkpoint atual."""
+
+    return com_retry_timeout(
+        ctx,
+        operacao=operacao,
+        descricao=descricao,
+        recuperar=lambda: restaurar_checkpoint(ctx),
+        concluida=concluida,
+    )
 
 
 def _filtrar_celulas_concorrencia(cells):
@@ -106,7 +128,8 @@ def _ies_selecionado(ctx: BrowserContext, container_id: str, esperado: str) -> b
         if not nome_esperado or not nome_titulo:
             return False
         return nome_esperado in nome_titulo or nome_titulo in nome_esperado
-    except Exception:
+    except Exception as exc:
+        propagar_timeout(exc)
         return False
 
 
@@ -226,7 +249,8 @@ def _selecionar_ies_para_review(
     # Mesmo padrão do fluxo principal: primeiro lista as opções disponíveis no município.
     try:
         opcoes = listar_opcoes_select2_multi(ctx, container_ids)
-    except Exception:
+    except Exception as exc:
+        propagar_timeout(exc)
         opcoes = []
 
     nome_norm = _norm_label(nome_busca)
@@ -262,7 +286,8 @@ def _selecionar_ies_para_review(
         try:
             el = ctx.driver.find_element(By.ID, container_ids[0])
             selecionado_nome = (el.get_attribute("title") or el.text or "").strip() or candidato
-        except Exception:
+        except Exception as exc:
+            propagar_timeout(exc)
             selecionado_nome = candidato
         return True, selecionado_nome
 
@@ -283,7 +308,8 @@ def _coletar_notas_ies_review(
         if select2_pick_first(ctx, "select2-conceitoCurso-container"):
             elc = ctx.driver.find_element(By.ID, "select2-conceitoCurso-container")
             conceito_valor = (elc.get_attribute("title") or elc.text or "").strip() or None
-    except Exception:
+    except Exception as exc:
+        propagar_timeout(exc)
         conceito_valor = None
 
     try:
@@ -298,7 +324,7 @@ def _coletar_notas_ies_review(
                 )
             )
         except TimeoutException:
-            return None
+            raise
     aguardar_captcha(ctx)
     botao_pesquisar.click()
 
@@ -320,7 +346,8 @@ def _coletar_notas_ies_review(
             try:
                 nota_enem = extrair_nota_enem_de_linha(ctx, ultima_cat)
                 nota_cat = normalizar_decimal_pt(nota_enem) if nota_enem else None
-            except Exception:
+            except Exception as exc:
+                propagar_timeout(exc)
                 nota_cat = None
             if nota_cat is not None:
                 break
@@ -351,6 +378,8 @@ def _coletar_notas_ies_review(
 
 def _pesquisar_e_aguardar(ctx: BrowserContext) -> None:
     """Clica em Pesquisar e aguarda a tabela de resultados aparecer."""
+    if _pesquisa_concluida(ctx):
+        return
     try:
         botao_pesquisar = ctx.wait.until(
             EC.element_to_be_clickable((By.ID, "btnBuscarCursos"))
@@ -364,6 +393,47 @@ def _pesquisar_e_aguardar(ctx: BrowserContext) -> None:
     aguardar_captcha(ctx)
     botao_pesquisar.click()
     ctx.wait.until(EC.presence_of_element_located((By.XPATH, "//table/tbody/tr")))
+
+
+def _pesquisa_concluida(ctx: BrowserContext) -> bool:
+    try:
+        return bool(ctx.driver.find_elements(By.XPATH, "//table/tbody/tr"))
+    except Exception as exc:
+        propagar_timeout(exc)
+        return False
+
+
+def _nova_consulta_concluida(ctx: BrowserContext) -> bool:
+    """Reconhece uma navegação tardia sem depender do clique que a iniciou."""
+
+    try:
+        formulario = ctx.driver.find_elements(By.ID, "select2-noEstado-container")
+        resultados = ctx.driver.find_elements(By.XPATH, "//table/tbody/tr")
+        return bool(formulario) and not bool(resultados)
+    except Exception as exc:
+        propagar_timeout(exc)
+        return False
+
+
+def _garantir_nova_consulta(ctx: BrowserContext) -> None:
+    if _nova_consulta_concluida(ctx):
+        return
+    abrir_nova_consulta(ctx)
+
+
+def _ler_nota_categoria(
+    ctx: BrowserContext,
+    label: str,
+    codigo: int,
+) -> Optional[str]:
+    """Reaplica a categoria e obtém uma linha nova após qualquer recarga."""
+
+    if not selecionar_categoria(ctx, tipo_label=label, tipo_codigo=codigo):
+        return None
+    ultima_linha = obter_ultima_linha_pre_selecionado(ctx)
+    if not ultima_linha:
+        return None
+    return extrair_nota_enem_de_linha(ctx, ultima_linha)
 
 
 def buscar_notas_por_municipio(
@@ -380,30 +450,52 @@ def buscar_notas_por_municipio(
 ) -> Tuple[List[Dict], bool]:
     resultados: List[Dict] = []
     pesquisa_executada = False
-    ies_ja_salvos = ies_ja_salvos or set()
+    if ies_ja_salvos is None:
+        ies_ja_salvos = set()
     caminho_csv = caminho_csv or _caminho_csv_modalidade()
 
-    select2(ctx, "select2-noMunicipio-container", municipio)
+    ctx.checkpoint.fase = "filtros_municipio"
+    ctx.checkpoint.estado = estado
+    ctx.checkpoint.municipio = municipio
+    ctx.checkpoint.curso = "MEDICINA"
+    ctx.checkpoint.limpar_apos_municipio()
+
+    _executar_com_pausa(
+        ctx,
+        operacao=lambda: select2(ctx, "select2-noMunicipio-container", municipio),
+        descricao=f"seleção do município {municipio}/{uf}",
+    )
     human_delay(ctx.fast_mode, 0.2, 0.5)
 
-    if not curso_existe(ctx, "MEDICINA"):
+    curso_disponivel = _executar_com_pausa(
+        ctx,
+        operacao=lambda: curso_existe(ctx, "MEDICINA"),
+        descricao=f"disponibilidade do curso em {municipio}/{uf}",
+    )
+    if not curso_disponivel:
         print("⏭️ Sem Medicina — pulando")
         return resultados, pesquisa_executada
 
-    try:
-        select2_exact(ctx, "select2-noCursosPublico-container", "MEDICINA")
-    except TimeoutException:
-        print("⚠️ Não foi possível selecionar MEDICINA (exato)")
-        return resultados, pesquisa_executada
+    _executar_com_pausa(
+        ctx,
+        operacao=lambda: select2_exact(
+            ctx, "select2-noCursosPublico-container", "MEDICINA"
+        ),
+        descricao=f"seleção do curso em {municipio}/{uf}",
+    )
     human_delay(ctx.fast_mode, 0.2, 0.5)
 
     ies_container_ids = ["select2-iesPublico-container"]
-    try:
-        esperar_select2_habilitado(ctx, ies_container_ids[0])
-    except TimeoutException:
-        print("⚠️ IES ainda desabilitado após aguardar")
-        return resultados, pesquisa_executada
-    ies_lista = listar_opcoes_select2_multi(ctx, ies_container_ids)
+    _executar_com_pausa(
+        ctx,
+        operacao=lambda: esperar_select2_habilitado(ctx, ies_container_ids[0]),
+        descricao=f"habilitação da lista de IES em {municipio}/{uf}",
+    )
+    ies_lista = _executar_com_pausa(
+        ctx,
+        operacao=lambda: listar_opcoes_select2_multi(ctx, ies_container_ids),
+        descricao=f"listagem de IES em {municipio}/{uf}",
+    )
     if not ies_lista:
         print("⚠️ Nenhuma IES listada para este município")
         return resultados, pesquisa_executada
@@ -428,12 +520,22 @@ def buscar_notas_por_municipio(
             print(f"⏭️ IES já presente no CSV, pulando: {ies}")
             continue
         print(f"🏫 IES ({idx+1}/{len(ies_lista)}): {ies}")
+        ctx.checkpoint.fase = "selecao_ies"
+        ctx.checkpoint.ies_nome = ies_nome_busca
+        ctx.checkpoint.ies_codigo = codigo_lista
+        ctx.checkpoint.conceito = None
         ok_ies = False
         codigo_selecionado: Optional[str] = None
         ies_nome_registro = ies
         for tent in range(5):
             # Busca da IES sempre pelo nome (sem código) para evitar quebrar o Select2.
-            ok_ies = select2_exact_multi(ctx, ies_container_ids, ies_nome_busca)
+            ok_ies = _executar_com_pausa(
+                ctx,
+                operacao=lambda: select2_exact_multi(
+                    ctx, ies_container_ids, ies_nome_busca
+                ),
+                descricao=f"seleção da IES '{ies}' em {municipio}/{uf}",
+            )
             if not ok_ies and _ies_selecionado(ctx, ies_container_ids[0], ies):
                 ok_ies = True
 
@@ -445,7 +547,8 @@ def buscar_notas_por_municipio(
                     if codigo_lista and codigo_selecionado and codigo_lista != codigo_selecionado:
                         print(f"⚠️ Código divergente entre opção ({codigo_lista}) e selecionado ({codigo_selecionado}) — armazenando o selecionado")
                     print(f"✅ Selecionado: {selecionado}")
-                except Exception:
+                except Exception as exc:
+                    propagar_timeout(exc)
                     pass
                 break
             print(f"🔁 Retentando seleção da IES ({tent+1}/5): {ies}")
@@ -468,22 +571,37 @@ def buscar_notas_por_municipio(
 
         conceito_container_ids = ["select2-conceitoCurso-container"]
         conceito_container_presente = None
+        ultimo_timeout_conceito: TimeoutException | None = None
         for cid in conceito_container_ids:
             try:
-                ctx.wait.until(EC.presence_of_element_located((By.ID, cid)))
+                _executar_com_pausa(
+                    ctx,
+                    operacao=lambda cid=cid: ctx.wait.until(
+                        EC.presence_of_element_located((By.ID, cid))
+                    ),
+                    descricao=f"carregamento do conceito da IES '{ies}'",
+                )
                 conceito_container_presente = cid
                 break
-            except TimeoutException:
+            except TimeoutException as exc:
+                ultimo_timeout_conceito = exc
                 continue
 
         if not conceito_container_presente:
-            print("⚠️ Select2 de conceito não disponível após IES")
-            continue
+            raise ultimo_timeout_conceito or TimeoutException(
+                "Select2 de conceito não disponível após IES"
+            )
 
         conceito_valor: Optional[str] = None
         conceito_ok = False
         for tent in range(2):
-            if select2_pick_first(ctx, conceito_container_presente):
+            if _executar_com_pausa(
+                ctx,
+                operacao=lambda: select2_pick_first(
+                    ctx, conceito_container_presente
+                ),
+                descricao=f"seleção do conceito da IES '{ies}'",
+            ):
                 conceito_ok = True
                 break
             print(f"🔁 Retentando conceito ({tent+1}/2)")
@@ -494,28 +612,23 @@ def buscar_notas_por_municipio(
         try:
             elc = ctx.driver.find_element(By.ID, conceito_container_presente)
             conceito_valor = (elc.get_attribute("title") or elc.text or "").strip()
-        except Exception:
+        except Exception as exc:
+            propagar_timeout(exc)
             conceito_valor = None
 
-        try:
-            com_retry_timeout(
-                ctx,
-                operacao=lambda: _pesquisar_e_aguardar(ctx),
-                descricao=f"pesquisa IES '{ies}' em {municipio}/{uf}",
-            )
-            pesquisa_executada = True
-        except (TimeoutException, WebDriverException):
-            print(f"⚠️ Falha persistente ao pesquisar IES '{ies}' em {municipio} após retentativas — registrando falha")
-            if registrar_falha:
-                salvar_falha_ies({
-                    "estado": uf,
-                    "municipio": municipio,
-                    "curso": "MEDICINA",
-                    "ies": ies,
-                    "ies_codigo": codigo_lista,
-                    "motivo": "timeout_pesquisa",
-                })
-            continue
+        ctx.checkpoint.fase = "pesquisa"
+        ctx.checkpoint.ies_nome = _nome_sem_codigo_ies(ies_nome_registro)
+        ctx.checkpoint.ies_codigo = codigo_selecionado or codigo_lista
+        ctx.checkpoint.conceito = conceito_valor
+
+        com_retry_timeout(
+            ctx,
+            operacao=lambda: _pesquisar_e_aguardar(ctx),
+            descricao=f"pesquisa IES '{ies}' em {municipio}/{uf}",
+            recuperar=lambda: restaurar_checkpoint(ctx),
+            concluida=lambda: _pesquisa_concluida(ctx),
+        )
+        pesquisa_executada = True
 
         categorias = [
             ("Ampla", 1, "nota_enem_ultimo_ampla"),
@@ -524,22 +637,22 @@ def buscar_notas_por_municipio(
         ]
         enem_por_categoria: Dict[str, Optional[str]] = {}
         for label, codigo, chave in categorias:
+            ctx.checkpoint.fase = f"categoria_{label.lower()}"
             nota_cat = None
             for tent in range(2):
-                ok = selecionar_categoria(ctx, tipo_label=label, tipo_codigo=codigo)
-                if not ok:
-                    print(f"🔁 Categoria {label} não selecionada, tentando novamente ({tent+1}/2)")
-                    human_delay(ctx.fast_mode, 0.2, 0.4)
-                    continue
-                ultima_cat = obter_ultima_linha_pre_selecionado(ctx)
-                if not ultima_cat:
-                    print(f"🔁 Linha não encontrada em {label}, retentando ({tent+1}/2)")
-                    human_delay(ctx.fast_mode, 0.2, 0.4)
-                    continue
                 try:
-                    nota_enem = extrair_nota_enem_de_linha(ctx, ultima_cat)
-                except Exception:
+                    nota_enem = _executar_com_pausa(
+                        ctx,
+                        operacao=lambda: _ler_nota_categoria(ctx, label, codigo),
+                        descricao=f"categoria/tabela/nota {label} da IES '{ies}'",
+                    )
+                except Exception as exc:
+                    propagar_timeout(exc)
                     nota_enem = None
+                if not nota_enem:
+                    print(f"🔁 Linha/nota não encontrada em {label}, retentando ({tent+1}/2)")
+                    human_delay(ctx.fast_mode, 0.2, 0.4)
+                    continue
                 nota_cat = normalizar_decimal_pt(nota_enem) if nota_enem else None
                 if nota_cat is not None:
                     break
@@ -574,10 +687,24 @@ def buscar_notas_por_municipio(
             print("⚠️ Nenhuma nota obtida após retentativas — seguindo para próxima IES")
 
         if idx < len(ies_lista) - 1:
-            if not abrir_nova_consulta(ctx):
-                print("⚠️ Não foi possível acionar 'Nova Consulta' para próxima IES")
-                break
-            if not aplicar_filtros(ctx, estado=estado, municipio=municipio, curso="MEDICINA"):
+            ctx.checkpoint.fase = "nova_consulta"
+            _executar_com_pausa(
+                ctx,
+                operacao=lambda: _garantir_nova_consulta(ctx),
+                descricao=f"Nova Consulta após IES '{ies}' em {municipio}/{uf}",
+                concluida=lambda: _nova_consulta_concluida(ctx),
+            )
+            filtros_restaurados = _executar_com_pausa(
+                ctx,
+                operacao=lambda: aplicar_filtros(
+                    ctx,
+                    estado=estado,
+                    municipio=municipio,
+                    curso="MEDICINA",
+                ),
+                descricao=f"reaplicação dos filtros de {municipio}/{uf}",
+            )
+            if not filtros_restaurados:
                 print("⚠️ Não foi possível reconfigurar filtros após 'Nova Consulta'")
                 break
 
@@ -754,7 +881,14 @@ def run_scraper(
     elif modo_alvos:
         print(f"▶️ Modo alvo: {len(alvos_review or {})} município(s) com IES do CSV de falhas")
 
-    preparar_primeira_pagina(ctx)
+    ctx.checkpoint.fase = "inicio"
+    ctx.checkpoint.estado = None
+    ctx.checkpoint.limpar_apos_estado()
+    _executar_com_pausa(
+        ctx,
+        operacao=lambda: preparar_primeira_pagina(ctx),
+        descricao="carregamento inicial da consulta",
+    )
 
     primeiro_estado = True
     estado_teve_pesquisa = False
@@ -778,20 +912,38 @@ def run_scraper(
 
         if not primeiro_estado:
             if estado_teve_pesquisa:
-                if not abrir_nova_consulta(ctx):
-                    print("⚠️ 'Nova Consulta' não disponível — prosseguindo apenas alterando filtros")
+                ctx.checkpoint.fase = "nova_consulta"
+                _executar_com_pausa(
+                    ctx,
+                    operacao=lambda: _garantir_nova_consulta(ctx),
+                    descricao=f"Nova Consulta antes de {estado}",
+                    concluida=lambda: _nova_consulta_concluida(ctx),
+                )
             else:
                 # Não houve pesquisa no estado anterior: o botão não existe; apenas siga alterando filtros
                 print("ℹ️ Sem pesquisa no estado anterior — pulando 'Nova Consulta' e apenas alterando filtros")
         primeiro_estado = False
         estado_teve_pesquisa = False
 
-        if not aplicar_filtros(ctx, estado=estado):
+        ctx.checkpoint.fase = "estado"
+        ctx.checkpoint.estado = estado
+        ctx.checkpoint.limpar_apos_estado()
+        estado_aplicado = _executar_com_pausa(
+            ctx,
+            operacao=lambda: aplicar_filtros(ctx, estado=estado),
+            descricao=f"seleção do estado {estado}",
+        )
+        if not estado_aplicado:
             print("⚠️ Não foi possível selecionar Estado; avançando")
             continue
         human_delay(ctx.fast_mode, 0.2, 0.5)
 
-        municipios = listar_opcoes_select2(ctx, "select2-noMunicipio-container")
+        ctx.checkpoint.fase = "lista_municipios"
+        municipios = _executar_com_pausa(
+            ctx,
+            operacao=lambda: listar_opcoes_select2(ctx, "select2-noMunicipio-container"),
+            descricao=f"listagem de municípios de {uf}",
+        )
         print(f"➡️ {len(municipios)} municípios")
 
         for i, municipio in enumerate(municipios):
@@ -811,20 +963,41 @@ def run_scraper(
                 print("⏭️ Já processado — pulando")
                 continue
 
-            if not aplicar_filtros(ctx, estado=estado, municipio=municipio, curso="MEDICINA"):
+            ctx.checkpoint.fase = "filtros_municipio"
+            ctx.checkpoint.estado = estado
+            ctx.checkpoint.municipio = municipio
+            ctx.checkpoint.curso = "MEDICINA"
+            ctx.checkpoint.limpar_apos_municipio()
+            filtros_aplicados = _executar_com_pausa(
+                ctx,
+                operacao=lambda: aplicar_filtros(
+                    ctx,
+                    estado=estado,
+                    municipio=municipio,
+                    curso="MEDICINA",
+                ),
+                descricao=f"filtros de {municipio}/{uf}",
+            )
+            if not filtros_aplicados:
                 print("⚠️ Não foi possível aplicar filtros para o município; seguindo para o próximo")
                 continue
 
+            pesquisou = False
+            ies_salvos_municipio = ies_por_mun.setdefault((uf, municipio), set())
             try:
-                res, pesquisou = buscar_notas_por_municipio(
+                res, pesquisou = _executar_com_pausa(
                     ctx,
-                    municipio,
-                    estado,
-                    uf,
-                    ies_ja_salvos=ies_por_mun.get((uf, municipio), set()),
-                    ies_alvo_nome_norm=(alvos_review or {}).get((uf, municipio), (set(), set()))[0] if modo_alvos else None,
-                    ies_alvo_codigo=(alvos_review or {}).get((uf, municipio), (set(), set()))[1] if modo_alvos else None,
-                    caminho_csv=caminho_csv,
+                    operacao=lambda: buscar_notas_por_municipio(
+                        ctx,
+                        municipio,
+                        estado,
+                        uf,
+                        ies_ja_salvos=ies_salvos_municipio,
+                        ies_alvo_nome_norm=(alvos_review or {}).get((uf, municipio), (set(), set()))[0] if modo_alvos else None,
+                        ies_alvo_codigo=(alvos_review or {}).get((uf, municipio), (set(), set()))[1] if modo_alvos else None,
+                        caminho_csv=caminho_csv,
+                    ),
+                    descricao=f"coleta de {municipio}/{uf}",
                 )
                 if pesquisou:
                     estado_teve_pesquisa = True
@@ -835,22 +1008,33 @@ def run_scraper(
                         on_registro_salvo(r)
             except CaptchaError:
                 raise
-            except Exception:
+            except Exception as exc:
+                propagar_timeout(exc)
                 pesquisou = False
 
             # evita clicar em Nova Consulta quando não houve pesquisa (curso inexistente)
-            pesquisou = locals().get("pesquisou", False)
-
             human_delay(ctx.fast_mode, 0.3, 0.7)
 
             if i < len(municipios) - 1:
                 deve_acionar_nova_consulta = modo_alvos or pesquisou
                 if deve_acionar_nova_consulta:
-                    if not abrir_nova_consulta(ctx):
-                        print("⚠️ Não foi possível acionar 'Nova Consulta' para o próximo município; seguindo apenas alterando filtros")
-                    else:
-                        if not aplicar_filtros(ctx, estado=estado):
-                            print("⚠️ Não foi possível reaplicar estado após 'Nova Consulta'")
+                    ctx.checkpoint.fase = "nova_consulta"
+                    _executar_com_pausa(
+                        ctx,
+                        operacao=lambda: _garantir_nova_consulta(ctx),
+                        descricao=f"Nova Consulta após {municipio}/{uf}",
+                        concluida=lambda: _nova_consulta_concluida(ctx),
+                    )
+                    ctx.checkpoint.fase = "estado"
+                    ctx.checkpoint.estado = estado
+                    ctx.checkpoint.limpar_apos_estado()
+                    estado_reaplicado = _executar_com_pausa(
+                        ctx,
+                        operacao=lambda: aplicar_filtros(ctx, estado=estado),
+                        descricao=f"reaplicação do estado {estado}",
+                    )
+                    if not estado_reaplicado:
+                        print("⚠️ Não foi possível reaplicar estado após 'Nova Consulta'")
                 else:
                     # sem pesquisa no município atual: botão não existe; apenas siga para o próximo aplicando filtros no próximo loop
                     pass
@@ -1008,7 +1192,8 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
                     else:
                         esperar_select2_habilitado(ctx, "select2-noCursosPublico-container")
                         disponibilidade_confirmada.append(curso_existe(ctx, curso_val))
-                except Exception:
+                except Exception as exc:
+                    propagar_timeout(exc)
                     disponibilidade_confirmada.append(None)
                 human_delay(ctx.fast_mode, 0.15, 0.3)
 
@@ -1053,7 +1238,14 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
     else:
         print("ℹ️ CSV ainda vazio — iremos preenchê-lo apenas com IES descobertas")
 
-    preparar_primeira_pagina(ctx)
+    ctx.checkpoint.fase = "inicio"
+    ctx.checkpoint.estado = None
+    ctx.checkpoint.limpar_apos_estado()
+    _executar_com_pausa(
+        ctx,
+        operacao=lambda: preparar_primeira_pagina(ctx),
+        descricao="carregamento inicial da consulta (--check)",
+    )
 
     ufs_csv_reverso: List[str] = []
     ufs_csv_set: Set[str] = set()
@@ -1080,7 +1272,15 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
     for uf, estado in estados_iteracao:
         print(f"\n🟦 Estado: {estado}")
 
-        if not aplicar_filtros(ctx, estado=estado):
+        ctx.checkpoint.fase = "estado"
+        ctx.checkpoint.estado = estado
+        ctx.checkpoint.limpar_apos_estado()
+        estado_aplicado = _executar_com_pausa(
+            ctx,
+            operacao=lambda: aplicar_filtros(ctx, estado=estado),
+            descricao=f"seleção do estado {estado} (--check)",
+        )
+        if not estado_aplicado:
             print("⚠️ Não foi possível selecionar Estado; avançando")
             continue
         human_delay(ctx.fast_mode, 0.2, 0.5)
@@ -1088,11 +1288,14 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
         if ordem_municipios_reversa:
             municipios = municipios_por_uf.get(uf, [])
         else:
-            try:
-                municipios = listar_opcoes_select2(ctx, "select2-noMunicipio-container")
-            except Exception:
-                print("⚠️ Não foi possível listar municípios; avançando")
-                continue
+            ctx.checkpoint.fase = "lista_municipios"
+            municipios = _executar_com_pausa(
+                ctx,
+                operacao=lambda: listar_opcoes_select2(
+                    ctx, "select2-noMunicipio-container"
+                ),
+                descricao=f"listagem de municípios de {uf} (--check)",
+            )
 
         for i, municipio in enumerate(municipios):
             print(f"📍 {municipio}")
@@ -1107,8 +1310,17 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
                     continue
 
             municipios_verificados += 1
-            ok_filtros, motivo_filtros, tentativas_filtros = _aplicar_filtros_check_resiliente(
-                uf, estado, municipio, curso
+            ctx.checkpoint.fase = "filtros_municipio"
+            ctx.checkpoint.estado = estado
+            ctx.checkpoint.municipio = municipio
+            ctx.checkpoint.curso = curso
+            ctx.checkpoint.limpar_apos_municipio()
+            ok_filtros, motivo_filtros, tentativas_filtros = _executar_com_pausa(
+                ctx,
+                operacao=lambda: _aplicar_filtros_check_resiliente(
+                    uf, estado, municipio, curso
+                ),
+                descricao=f"filtros de {municipio}/{uf} (--check)",
             )
             if not ok_filtros:
                 if motivo_filtros == "indisponivel_confirmado":
@@ -1121,14 +1333,18 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
             if tentativas_filtros > 1:
                 municipios_recuperados_retry += 1
 
-            try:
+            def _listar_ies_check() -> List[str]:
                 esperar_select2_habilitado(ctx, "select2-iesPublico-container")
-                ies_lista = listar_opcoes_select2_multi(ctx, ["select2-iesPublico-container"])
-            except TimeoutException:
-                print("⚠️ IES ainda desabilitado após aguardar — pulando município")
-                ies_lista = []
-            except Exception:
-                ies_lista = []
+                return listar_opcoes_select2_multi(
+                    ctx, ["select2-iesPublico-container"]
+                )
+
+            ctx.checkpoint.fase = "lista_ies"
+            ies_lista = _executar_com_pausa(
+                ctx,
+                operacao=_listar_ies_check,
+                descricao=f"listagem de IES em {municipio}/{uf} (--check)",
+            )
 
             chave_mun = (uf, municipio)
             existentes_set = ies_por_mun.get(chave_mun, set())
@@ -1148,17 +1364,35 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
                     # fallback para casar pelo código de IES quando o nome diverge
                     reg_existente = existentes_idx_por_codigo.get((uf, municipio, codigo_ies))
 
-                ok_sel = select2_exact_multi(ctx, ["select2-iesPublico-container"], ies)
+                ctx.checkpoint.fase = "selecao_ies"
+                ctx.checkpoint.ies_nome = _nome_sem_codigo_ies(ies)
+                ctx.checkpoint.ies_codigo = codigo_ies
+                ctx.checkpoint.conceito = None
+                ok_sel = _executar_com_pausa(
+                    ctx,
+                    operacao=lambda: select2_exact_multi(
+                        ctx, ["select2-iesPublico-container"], ies
+                    ),
+                    descricao=f"seleção da IES '{ies}' (--check)",
+                )
                 if not ok_sel:
                     print(f"⚠️ Não foi possível selecionar IES para ler conceito: {ies}")
                     continue
 
                 conceito_valor = None
                 try:
-                    if select2_pick_first(ctx, "select2-conceitoCurso-container"):
+                    if _executar_com_pausa(
+                        ctx,
+                        operacao=lambda: select2_pick_first(
+                            ctx, "select2-conceitoCurso-container"
+                        ),
+                        descricao=f"seleção do conceito da IES '{ies}' (--check)",
+                    ):
                         elc = ctx.driver.find_element(By.ID, "select2-conceitoCurso-container")
                         conceito_valor = (elc.get_attribute("title") or elc.text or "").strip() or None
-                except Exception:
+                        ctx.checkpoint.conceito = conceito_valor
+                except Exception as exc:
+                    propagar_timeout(exc)
                     conceito_valor = None
 
                 if reg_existente:
@@ -1181,8 +1415,14 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
                     pass
 
                 if idx_ies < len(ies_lista) - 1:
-                    ok_refiltro, motivo_refiltro, _ = _aplicar_filtros_check_resiliente(
-                        uf, estado, municipio, curso
+                    ctx.checkpoint.fase = "filtros_municipio"
+                    ctx.checkpoint.limpar_apos_municipio()
+                    ok_refiltro, motivo_refiltro, _ = _executar_com_pausa(
+                        ctx,
+                        operacao=lambda: _aplicar_filtros_check_resiliente(
+                            uf, estado, municipio, curso
+                        ),
+                        descricao=f"reaplicação dos filtros de {municipio}/{uf} (--check)",
                     )
                     if not ok_refiltro:
                         if motivo_refiltro == "indisponivel_confirmado":
