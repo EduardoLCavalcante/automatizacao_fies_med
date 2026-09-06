@@ -6,40 +6,9 @@ from typing import List, Optional, Tuple
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 
-from src.core import (
-    BrowserContext,
-    PortalRequestTimeout,
-    emitir_aviso_tracker_indisponivel,
-    human_delay,
-    propagar_timeout,
-)
-
-
-_RESULT_ROWS_XPATH = "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr"
-
-
-def _assinatura_tabela(driver) -> tuple[str, ...]:
-    """Assinatura textual para detectar atualização mesmo com a mesma contagem."""
-
-    linhas = driver.find_elements(By.XPATH, _RESULT_ROWS_XPATH)
-    return tuple((linha.text or "").strip() for linha in linhas)
-
-
-def _categoria_ativa(botao) -> bool:
-    try:
-        classe = (botao.get_attribute("class") or "").lower()
-        aria = (botao.get_attribute("aria-pressed") or "").lower()
-        estado = (botao.get_attribute("data-active") or "").lower()
-        return (
-            aria == "true"
-            or estado in {"true", "1", "active", "selected"}
-            or any(token in classe.split() for token in ("active", "selected"))
-        )
-    except Exception as exc:
-        propagar_timeout(exc)
-        return False
+from src.core import BrowserContext, human_delay
 
 
 def expandir_todos_candidatos(ctx: BrowserContext) -> None:
@@ -51,7 +20,7 @@ def expandir_todos_candidatos(ctx: BrowserContext) -> None:
             )
         )
     except TimeoutException:
-        raise
+        return
 
     max_clicks = 500
     sem_crescimento = 0
@@ -67,8 +36,7 @@ def expandir_todos_candidatos(ctx: BrowserContext) -> None:
                 try:
                     if el.is_displayed():
                         return el
-                except Exception as exc:
-                    propagar_timeout(exc)
+                except Exception:
                     continue
         return None
 
@@ -85,20 +53,17 @@ def expandir_todos_candidatos(ctx: BrowserContext) -> None:
 
         try:
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", ver_mais_el)
-        except Exception as exc:
-            propagar_timeout(exc)
+        except Exception:
             pass
         clicked = False
         try:
             ver_mais_el.click()
             clicked = True
-        except Exception as exc:
-            propagar_timeout(exc)
+        except Exception:
             try:
                 driver.execute_script("arguments[0].click();", ver_mais_el)
                 clicked = True
-            except Exception as fallback_exc:
-                propagar_timeout(fallback_exc)
+            except Exception:
                 clicked = False
 
         if not clicked:
@@ -121,8 +86,7 @@ def expandir_todos_candidatos(ctx: BrowserContext) -> None:
             if sem_crescimento >= 2:
                 try:
                     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                except Exception as exc:
-                    propagar_timeout(exc)
+                except Exception:
                     pass
                 break
         else:
@@ -143,7 +107,7 @@ def obter_ultima_linha(ctx: BrowserContext):
             )
         )
     except TimeoutException:
-        raise
+        return None
 
     expandir_todos_candidatos(ctx)
 
@@ -160,8 +124,7 @@ def _linha_e_pre_selecionado(linha) -> bool:
             return True
         if "pré-selecionado" in (linha.text or "").lower():
             return True
-    except Exception as exc:
-        propagar_timeout(exc)
+    except Exception:
         return False
     return False
 
@@ -175,7 +138,7 @@ def obter_ultima_linha_pre_selecionado(ctx: BrowserContext):
             )
         )
     except TimeoutException:
-        raise
+        return None
 
     expandir_todos_candidatos(ctx)
 
@@ -186,108 +149,43 @@ def obter_ultima_linha_pre_selecionado(ctx: BrowserContext):
     return None
 
 
+def _assinatura_tabela(driver):
+    """Identidade e conteúdo das linhas, lidos juntos para reconhecer a atualização."""
+    linhas = driver.execute_script("""
+        let rows = [...document.querySelectorAll('#listaResultadoConsulta tr')];
+        if (!rows.length) rows = [...document.querySelectorAll('table tbody tr')];
+        return rows.map(row => ({element: row, text: row.innerText}));
+    """)
+    return tuple((row['element'].id, row['text']) for row in linhas)
+
+
 def selecionar_categoria(ctx: BrowserContext, tipo_label: Optional[str] = None, tipo_codigo: Optional[int] = None) -> bool:
-    driver, wait = ctx.driver, ctx.wait
+    driver = ctx.driver
     alvos: List[Tuple[str, str]] = []
     if tipo_codigo is not None:
-        alvos.append((By.XPATH, f"//button[contains(@onclick,'selecaoClassificaoTipoVaga({tipo_codigo})')]") )
+        alvos.append((By.XPATH, f"//button[contains(@onclick,'selecaoClassificaoTipoVaga({tipo_codigo})')]"))
     if tipo_label:
-        alvos.append((By.XPATH, f"//button[contains(normalize-space(.), '{tipo_label}')]") )
-
-    try:
-        assinatura_antes = _assinatura_tabela(driver)
-    except Exception as exc:
-        propagar_timeout(exc)
-        assinatura_antes = ()
-
-    btn = None
-    ultimo_timeout = None
-    for by, sel in alvos:
-        try:
-            el = wait.until(EC.element_to_be_clickable((by, sel)))
-            if el and el.is_displayed():
-                btn = el
-                break
-        except TimeoutException as exc:
-            ultimo_timeout = exc
-            continue
-
-    if not btn:
-        if ultimo_timeout is not None:
-            raise ultimo_timeout
+        alvos.append((By.XPATH, f"//button[contains(normalize-space(.), '{tipo_label}')]"))
+    if not alvos:
         return False
 
-    # Alguns portais deixam a categoria inicial marcada. Clicar de novo nesse
-    # botão não produz uma nova resposta e fazia o código confundir uma tabela
-    # válida com timeout.
-    if _categoria_ativa(btn):
-        return True
-
-    tracker = getattr(ctx, "network", None)
-    operacao_rede = tracker.begin(driver) if tracker is not None else None
+    def localizar(_):
+        for by, sel in alvos:
+            for el in driver.find_elements(by, sel):
+                if el.is_displayed() and el.is_enabled():
+                    return el
+        return False
 
     try:
+        btn = ctx.wait.until(localizar)
+        antes = _assinatura_tabela(driver)
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
-    except Exception as exc:
-        propagar_timeout(exc)
-        pass
-    try:
         btn.click()
-    except Exception as exc:
-        propagar_timeout(exc)
-        try:
-            driver.execute_script("arguments[0].click();", btn)
-        except Exception as fallback_exc:
-            propagar_timeout(fallback_exc)
-            return False
-
-    ultimo_snapshot = None
-
-    def tabela_atualizada(_driver) -> bool:
-        nonlocal ultimo_snapshot
-        if tracker is not None and operacao_rede is not None:
-            ultimo_snapshot = tracker.snapshot(driver, operacao_rede)
-            if ultimo_snapshot.has_busy:
-                raise PortalRequestTimeout(
-                    f"requisição da categoria falhou: {ultimo_snapshot.description}"
-                )
-            # Não considerar o DOM pronto enquanto a requisição ainda está em
-            # andamento: uma resposta antiga pode continuar visível.
-            if ultimo_snapshot.pending:
-                return False
-
-        assinatura_atual = _assinatura_tabela(driver)
-        if _categoria_ativa(btn):
-            return True
-        return bool(assinatura_atual) and assinatura_atual != assinatura_antes
-
-    try:
-        WebDriverWait(driver, 8).until(tabela_atualizada)
+        WebDriverWait(
+            driver, 8, poll_frequency=0.2,
+            ignored_exceptions=(StaleElementReferenceException,),
+        ).until(lambda d: (atual := _assinatura_tabela(d)) and atual != antes)
         return True
-    except PortalRequestTimeout:
-        raise
     except TimeoutException:
-        if tracker is not None and operacao_rede is not None:
-            ultimo_snapshot = tracker.snapshot(driver, operacao_rede)
-            if ultimo_snapshot.has_busy:
-                raise PortalRequestTimeout(
-                    f"requisição da categoria falhou: {ultimo_snapshot.description}"
-                )
-            if ultimo_snapshot.pending:
-                raise PortalRequestTimeout(
-                    f"requisição da categoria não terminou: {ultimo_snapshot.description}"
-                )
-            if not ultimo_snapshot.available:
-                emitir_aviso_tracker_indisponivel(ctx)
-            # HTTP 2xx sem atualização do resultado é uma falha local de
-            # validação; o chamador pode tentar novamente sem iniciar pausa de
-            # servidor. O mesmo vale para ausência de categoria ativa quando
-            # há uma tabela antiga, já que não houve erro de rede confirmado.
-            if ultimo_snapshot.has_success and _assinatura_tabela(driver):
-                return False
-
-        # Sem rede e sem tabela não há pós-condição válida para a operação;
-        # propaga o timeout para o controlador central.
-        if not _assinatura_tabela(driver):
-            raise
+        # Não autoriza ler a tabela anterior se a troca não foi confirmada.
         return False

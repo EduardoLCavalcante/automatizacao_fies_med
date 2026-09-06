@@ -1,58 +1,15 @@
 """Utilitário de retry para operações sujeitas a timeout/504 no portal FIES."""
 
 import time
-from typing import Callable, TypeVar, cast
+from typing import Callable, TypeVar
 
-from selenium.common.exceptions import (
-    InvalidSessionIdException,
-    NoSuchWindowException,
-    TimeoutException,
-    WebDriverException,
-)
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.support.ui import WebDriverWait
 
 from src.core.browser import BrowserContext
-from src.core.captcha import pagina_esta_funcional
+from src.core.captcha import aguardar_captcha, pagina_esta_funcional
 
 T = TypeVar("T")
-
-
-def eh_timeout_recuperavel(exc: BaseException) -> bool:
-    """Distingue sobrecarga/timeout de falhas fatais do navegador."""
-
-    if isinstance(exc, (InvalidSessionIdException, NoSuchWindowException)):
-        return False
-    if isinstance(exc, TimeoutException):
-        return True
-    if not isinstance(exc, WebDriverException):
-        return False
-    mensagem = str(exc).lower()
-    return any(
-        marcador in mensagem
-        for marcador in ("504", "gateway timeout", "gateway time-out", "timed out", "timeout")
-    )
-
-
-def propagar_timeout(exc: BaseException) -> None:
-    """Evita que fallbacks ocultem timeout ou encerramento da sessão/janela."""
-
-    if isinstance(exc, (InvalidSessionIdException, NoSuchWindowException)):
-        raise exc
-    if eh_timeout_recuperavel(exc):
-        raise exc
-
-
-def _pausar_ate(
-    segundos: float,
-    monotonic: Callable[[], float],
-    sleep: Callable[[float], None],
-) -> None:
-    prazo = monotonic() + segundos
-    while True:
-        restante = prazo - monotonic()
-        if restante <= 0:
-            return
-        sleep(restante)
 
 
 def aguardar_pagina_responsiva(ctx: BrowserContext, timeout: int = 60) -> bool:
@@ -73,81 +30,54 @@ def com_retry_timeout(
     descricao: str = "operação",
     max_tentativas: int = 3,
     espera_entre_tentativas: int = 15,
-    recuperar: Callable[[], None] | None = None,
-    concluida: Callable[[], bool] | None = None,
-    *,
-    _monotonic: Callable[[], float] | None = None,
-    _sleep: Callable[[float], None] | None = None,
 ) -> T:
     """
-    Repete a operação em blocos. Após três timeouts, pausa pelo intervalo de
-    sobrecarga configurado, restaura o checkpoint e inicia um novo bloco.
-    O ciclo só termina com sucesso, erro não recuperável ou interrupção externa.
+    Executa `operacao`. Se ocorrer TimeoutException ou erro 504/WebDriverException
+    relacionado a timeout:
+
+      1. Aguarda `espera_entre_tentativas` segundos a página se recuperar sozinha.
+      2. Se houver CAPTCHA pendente/expirado, aguarda a resolução humana automaticamente.
+      3. Tenta novamente até `max_tentativas` vezes.
+
+    NÃO recarrega a página automaticamente, pois isso exigiria novo CAPTCHA.
+    Se todas as tentativas falharem, relança a última exceção para o chamador tratar.
+
+    Parâmetros:
+        ctx: contexto do browser (BrowserContext).
+        operacao: callable sem argumentos que executa a ação desejada e retorna T.
+        descricao: texto legível que identifica a operação, usado nas mensagens de log.
+        max_tentativas: número máximo de tentativas antes de desistir.
+        espera_entre_tentativas: segundos de espera passiva antes de cada retentativa.
     """
-    if max_tentativas <= 0:
-        raise ValueError("max_tentativas deve ser positivo")
-    if espera_entre_tentativas < 0:
-        raise ValueError("espera_entre_tentativas não pode ser negativa")
+    ultima_exc: Exception = RuntimeError("Nenhuma tentativa executada")
 
-    monotonic = _monotonic or time.monotonic
-    sleep = _sleep or time.sleep
-    ciclo = 1
-
-    def terminou_atrasada() -> bool:
-        if concluida is None:
-            return False
+    for tentativa in range(1, max_tentativas + 1):
         try:
-            return concluida()
+            return operacao()
+
         except (TimeoutException, WebDriverException) as exc:
-            if eh_timeout_recuperavel(exc):
-                return False
-            raise
+            ultima_exc = exc
+            msg = str(exc).lower()
 
-    while True:
-        for tentativa in range(1, max_tentativas + 1):
-            if terminou_atrasada():
-                print(f"Resposta tardia reconhecida em '{descricao}'; continuando.")
-                return cast(T, None)
-            try:
-                return operacao()
-            except (TimeoutException, WebDriverException) as exc:
-                if not eh_timeout_recuperavel(exc):
-                    raise
-                print(
-                    f"\nTimeout/504 em '{descricao}' "
-                    f"(ciclo {ciclo}, tentativa {tentativa}/{max_tentativas})."
-                )
-                if tentativa < max_tentativas:
-                    print(f"Aguardando {espera_entre_tentativas}s antes da nova tentativa.")
-                    _pausar_ate(espera_entre_tentativas, monotonic, sleep)
+            is_timeout = isinstance(exc, TimeoutException)
+            is_504 = "504" in msg or "timed out" in msg or "timeout" in msg
 
-        if terminou_atrasada():
-            print(f"Resposta tardia reconhecida em '{descricao}'; continuando.")
-            return cast(T, None)
+            # Outros WebDriverException (ex: elemento não encontrado) não devem ser retentados
+            if not (is_timeout or is_504):
+                raise
 
-        print(
-            f"Servidor possivelmente sobrecarregado em '{descricao}'. "
-            f"Pausa automática de {ctx.server_pause_seconds:g}s (ciclo {ciclo})."
-        )
-        _pausar_ate(ctx.server_pause_seconds, monotonic, sleep)
+            print(f"\nTimeout/504 detectado em '{descricao}' (tentativa {tentativa}/{max_tentativas}).")
+            print(f"   Aguardando {espera_entre_tentativas}s para a página se recuperar...")
+            time.sleep(espera_entre_tentativas)
 
-        if terminou_atrasada():
-            print(f"Resposta tardia reconhecida em '{descricao}'; continuando.")
-            return cast(T, None)
+            pagina_ok = aguardar_pagina_responsiva(ctx, timeout=30)
 
-        while recuperar is not None:
-            try:
-                recuperar()
-                break
-            except (TimeoutException, WebDriverException) as exc:
-                if not eh_timeout_recuperavel(exc):
-                    raise
-                ciclo += 1
-                print(
-                    f"Timeout ao restaurar '{descricao}'. "
-                    f"Nova pausa automática de {ctx.server_pause_seconds:g}s (ciclo {ciclo})."
-                )
-                _pausar_ate(ctx.server_pause_seconds, monotonic, sleep)
+            if not pagina_ok:
+                print("\nPágina não respondeu automaticamente.")
+                print("   Pode haver erro 504, Cloudflare ou tela em branco; nova tentativa será feita.")
+                continue
 
-        print(f"Pausa concluída; retomando '{descricao}'.")
-        ciclo += 1
+            aguardar_captcha(ctx)
+            print(f"   Página respondeu. Retentando '{descricao}'...")
+
+    raise ultima_exc

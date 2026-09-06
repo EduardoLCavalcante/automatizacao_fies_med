@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Callable
 from selenium.common.exceptions import (
     InvalidSessionIdException,
     NoSuchWindowException,
-    TimeoutException,
     WebDriverException,
 )
 
@@ -215,9 +214,6 @@ def aguardar_cloudflare_inicial(
 ) -> bool:
     """Cria um único checkpoint manual quando o primeiro desafio é Cloudflare."""
 
-    if getattr(ctx, "cloudflare_checkpoint_completed", False):
-        return False
-
     input_func = _input or input
     monotonic = _monotonic or time.monotonic
     sleep = _sleep or time.sleep
@@ -249,10 +245,8 @@ def aguardar_cloudflare_inicial(
                     intervencao_solicitada = True
                     deadline = monotonic() + ctx.captcha_timeout_seconds
                     ctx.captcha.last_state = None
-            elif snapshot.error_kind in {"504", "blank"}:
-                raise TimeoutException(
-                    f"portal temporariamente indisponível: {snapshot.error_kind}"
-                )
+            elif snapshot.error_kind == "blank":
+                pass
             elif snapshot.error_kind:
                 raise PortalStateError(
                     f"portal em estado inválido durante verificação inicial: {snapshot.error_kind}"
@@ -277,10 +271,6 @@ def detectar_estado_captcha(ctx: BrowserContext) -> CaptchaState:
     snapshot = inspecionar_pagina(ctx)
     if snapshot.error_kind == "cloudflare":
         raise CloudflareChallengeError("Cloudflare aguardando verificação humana")
-    if snapshot.error_kind in {"504", "blank"}:
-        raise TimeoutException(
-            f"portal temporariamente indisponível: {snapshot.error_kind}"
-        )
     if snapshot.error_kind:
         raise PortalStateError(f"portal em estado inválido: {snapshot.error_kind}")
 

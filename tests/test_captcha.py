@@ -1,7 +1,7 @@
 import io
 import unittest
 from contextlib import redirect_stdout
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
@@ -242,8 +242,7 @@ class CaptchaTests(unittest.TestCase):
             with self.subTest(error=error):
                 ctx = make_context([snapshot(error=error)])
                 self.assertFalse(pagina_esta_funcional(ctx))
-                expected = PortalStateError if error == "cloudflare" else TimeoutException
-                with self.assertRaises(expected):
+                with self.assertRaises(PortalStateError):
                     detectar_estado_captcha(ctx)
 
     def test_timeout_raises_after_configured_deadline(self):
@@ -269,37 +268,45 @@ class CaptchaTests(unittest.TestCase):
         self.assertFalse(ctx.captcha.seen_solved)
         self.assertEqual(1, ctx.captcha.generation)
 
-    def test_retry_uses_a_short_wait_before_repeating_operation(self):
+    def test_retry_waits_for_captcha_before_repeating_operation(self):
         ctx = make_context([snapshot(widget=False, api=False, form=True)])
         operation = Mock(side_effect=[TimeoutException("timeout"), "ok"])
-        clock = FakeClock()
 
-        result = com_retry_timeout(
-            ctx,
-            operation,
-            _monotonic=clock.monotonic,
-            _sleep=clock.sleep,
-        )
+        with (
+            patch("src.core.retry.time.sleep"),
+            patch("src.core.retry.aguardar_pagina_responsiva", return_value=True),
+            patch("src.core.retry.aguardar_captcha") as wait_captcha,
+        ):
+            result = com_retry_timeout(
+                ctx,
+                operation,
+                max_tentativas=2,
+                espera_entre_tentativas=0,
+            )
 
         self.assertEqual("ok", result)
-        self.assertEqual([15], clock.sleeps)
+        wait_captcha.assert_called_once_with(ctx)
         self.assertEqual(2, operation.call_count)
 
     def test_retry_does_not_swallow_captcha_timeout(self):
         ctx = make_context([snapshot()])
-        operation = Mock(side_effect=CaptchaTimeoutError("limite"))
-        clock = FakeClock()
+        operation = Mock(side_effect=TimeoutException("timeout"))
 
-        with self.assertRaises(CaptchaTimeoutError):
-            com_retry_timeout(
-                ctx,
-                operation,
-                _monotonic=clock.monotonic,
-                _sleep=clock.sleep,
-            )
-
-        self.assertEqual([], clock.sleeps)
-        operation.assert_called_once_with()
+        with (
+            patch("src.core.retry.time.sleep"),
+            patch("src.core.retry.aguardar_pagina_responsiva", return_value=True),
+            patch(
+                "src.core.retry.aguardar_captcha",
+                side_effect=CaptchaTimeoutError("limite"),
+            ),
+        ):
+            with self.assertRaises(CaptchaTimeoutError):
+                com_retry_timeout(
+                    ctx,
+                    operation,
+                    max_tentativas=2,
+                    espera_entre_tentativas=0,
+                )
 
 
 if __name__ == "__main__":

@@ -6,12 +6,11 @@ Scraper automatizado (Selenium) que percorre os estados e municípios no portal 
 - **Navegação automatizada:** Usa Selenium + Chrome para interagir com filtros (Estado, Município, Curso, IES, Conceito).
 - **Curso alvo:** Seleção exata de "MEDICINA" (evita confusão com Biomedicina).
 - **Categorias:** Coleta notas por categoria (Ampla, PPIQ, PCD) e a nota do último Pré-Selecionado na lista atual.
-- **CAPTCHA:** A resolução continua humana. O ENTER é usado somente no checkpoint inicial do Cloudflare; os CAPTCHAs seguintes são detectados automaticamente, inclusive quando expiram.
+- **CAPTCHA:** A resolução continua humana, mas o script detecta automaticamente conclusão e expiração, sem exigir ENTER.
 - **Persistência incremental:** Escreve/atualiza o arquivo CSV a cada município processado.
-- **Tratamento de timeout/504:** Três tentativas rápidas e, se o portal continuar sobrecarregado, pausa automática com reconstrução completa da consulta.
-- **Diagnóstico por requisição:** O Chrome rastreia apenas eventos resumidos de Document/XHR/Fetch do portal (sem cookies, headers, payloads ou tokens) e combina o status HTTP com a mudança real da tabela.
+- **Tratamento de timeout/504:** Sistema inteligente de retry que aguarda recuperação da página sem recarregar (preservando sessão e CAPTCHA).
 - **Robustez contra StaleElement:** Retry automático para elementos DOM que são re-renderizados durante navegação.
-- **Registro de falhas:** IES que não puderem ser selecionadas por motivo funcional são registradas em `notas_fies_medicina_falhas.csv` para revisão posterior; sobrecarga não gera esse registro.
+- **Registro de falhas:** IES que falharem após todas as tentativas são registradas em `notas_fies_medicina_falhas.csv` para revisão posterior.
 
 ## Requisitos
 - **Python 3.9+** (recomendado 3.10+)
@@ -50,8 +49,6 @@ Durante a execução:
 - A partir do CAPTCHA do portal, resolva o desafio no navegador. O script identifica o token automaticamente e continua sem novas confirmações no terminal.
 - Cada intervenção tem limite padrão de 300 segundos. Use `--captcha-timeout SEGUNDOS` para configurar outro inteiro positivo.
 - Se o limite expirar, o processo encerra com código `2`, fecha o Chrome e preserva o progresso já gravado.
-- Timeouts do portal não descartam a IES atual: após três tentativas, o Chrome permanece aberto, a automação pausa por 300 segundos e retoma sozinha. Use `--server-pause SEGUNDOS` para alterar esse intervalo.
-- Os ciclos de pausa não têm limite. Use `Ctrl+C` para interromper; o Chrome será fechado e tudo que já foi persistido continuará salvo.
 - O script iterará por todos os estados e seus municípios, selecionando o curso de Medicina e as IES disponíveis.
 - O arquivo de saída [notas_fies_medicina.csv](notas_fies_medicina.csv) é atualizado continuamente (encoding UTF-8 com BOM para fácil abertura no Excel).
 
@@ -97,14 +94,10 @@ python main.py --faltantes-txt --modalidade regular
 ### Comportamento em caso de CAPTCHA, timeout ou erro 504
 - O CAPTCHA é verificado no início, após "Nova Consulta", antes de "Pesquisar" e durante a recuperação de falhas.
 - Se um token já resolvido expirar, o terminal informa a expiração e volta a aguardar uma nova resolução humana.
-- Quando uma operação expira ou o portal retorna 504/página em branco, o sistema faz até três tentativas. Há uma espera de 15 segundos somente entre a primeira e a segunda e entre a segunda e a terceira.
-- Se a terceira tentativa falhar, o Chrome permanece aberto durante uma pausa automática de 300 segundos (ou o valor de `--server-pause`). Em seguida, a automação reabre `/consulta`, restaura modalidade, UF, município, curso, IES e conceito e repete a mesma operação.
-- Se o servidor continuar indisponível, um novo ciclo de três tentativas e pausa começa sem limite e sem solicitar ENTER. A execução só avança quando a operação atual tiver sucesso ou o operador usar `Ctrl+C`.
-- Antes de repetir um clique de pesquisa ou “Nova Consulta”, a automação verifica se a resposta anterior chegou atrasada, evitando clique ou gravação duplicada.
+- Quando a API do portal demorar muito ou retornar erro 504, o script **não recarrega a página** (para preservar a sessão e evitar novo CAPTCHA).
+- O sistema aguarda automaticamente 15 segundos para a página se recuperar sozinha.
 - O Cloudflare inicial possui um checkpoint humano por ENTER; ocorrências posteriores não são confundidas com CAPTCHA resolvido e seguem o fluxo de retry.
-- A identificação de sobrecarga usa o rastreio de rede do Chrome DevTools Protocol: respostas HTTP 504/5xx, falhas de conexão e requisições pendentes são timeouts de servidor; uma tabela válida sem erro de rede não é pausada como se fosse 504.
-- A validação da tabela compara o conteúdo, e não apenas a quantidade de linhas. A categoria inicial **Ampla** é lida diretamente, sem um segundo clique que poderia gerar um falso timeout.
-- Se o driver não disponibilizar o log de performance, o programa informa o fallback e continua usando a pós-condição do DOM.
+- Após 3 tentativas sem sucesso, a IES é registrada em `notas_fies_medicina_falhas.csv` e o script continua com a próxima.
 
 ## Saída (CSV)
 ### Arquivo principal
@@ -125,9 +118,9 @@ Colunas:
 
 ### Arquivo de falhas: [notas_fies_medicina_falhas.csv](notas_fies_medicina_falhas.csv)
 
-Registra IES que não puderam ser selecionadas por motivos funcionais, contendo:
+Registra IES que falharam após todas as tentativas de coleta, contendo:
 - **estado, municipio, curso, ies, ies_codigo**
-- **motivo:** Razão da falha (atualmente `nao_selecionada`). Timeouts e sobrecarga não geram falha nem fazem a automação pular a IES.
+- **motivo:** Razão da falha (ex.: `timeout_pesquisa`, `nao_selecionada`)
 
 Observações:
 - Notas podem vir vazias quando não encontradas ou quando a navegação encontra limitações da página.
@@ -137,7 +130,6 @@ Observações:
 No início de [src/config/settings.py](src/config/settings.py):
 - **`FAST_MODE`**: acelera interações e reduz esperas. Útil para evitar expiração de sessão; se notar instabilidade, defina como `False`.
 - **`CAPTCHA_WAIT_TIMEOUT_SECONDS`**: limite padrão por intervenção humana, em segundos (`300`). Pode ser sobrescrito por `--captcha-timeout`.
-- **`SERVER_BUSY_PAUSE_SECONDS`**: pausa padrão após três timeouts consecutivos, em segundos (`300`). Pode ser sobrescrita por `--server-pause`.
 - **`FIES_MODALIDADE`**: define a modalidade padrão (`"social"` ou `"regular"`). Pode ser sobrescrito pela flag `--modalidade` na linha de comando.
 
 ## Dicas de Uso
@@ -150,26 +142,39 @@ No início de [src/config/settings.py](src/config/settings.py):
 ### Sistema de Retry Inteligente para Timeout/504
 O scraper implementa um mecanismo robusto de tratamento de erros quando o portal FIES fica lento ou retorna erro 504:
 
-- **Tentativas rápidas:** Executa três tentativas por operação, com duas esperas de 15 segundos.
-- **Pausa de sobrecarga:** Depois da terceira falha, pausa pelo intervalo configurado em `--server-pause` e mantém o Chrome aberto.
-- **Recuperação por checkpoint:** Reabre a consulta e reaplica modalidade → UF → município → curso → IES → conceito antes de repetir a operação interrompida.
-- **Ciclos ilimitados:** Continua pausando e tentando até o sucesso ou `Ctrl+C`, sem registrar `timeout_pesquisa` nem avançar para outra IES.
+- **Preservação de sessão:** Nunca recarrega a página automaticamente, evitando perda de sessão e novo CAPTCHA.
+- **Recuperação automática:** Aguarda até 15 segundos para a página se recuperar sozinha.
 - **CAPTCHA assistido:** Após o checkpoint inicial do Cloudflare, detecta token pendente, resolvido ou expirado sem novos `input()`.
 - **Estados separados:** 504, Cloudflare e página em branco não são tratados como CAPTCHA.
+- **Retry configurável:** Até 3 tentativas antes de registrar falha e continuar.
+- **Registro de falhas:** IES problemáticas são salvas em `notas_fies_medicina_falhas.csv` com motivo detalhado.
 
 Implementado em `src/core/retry.py` com as funções:
-- `com_retry_timeout()`: Controla tentativas, pausas e ciclos ilimitados para timeout/504
-- `restaurar_checkpoint()`: Reconstrói a consulta depois da pausa
+- `aguardar_pagina_responsiva()`: Verifica se a página saiu do estado de loading
+- `com_retry_timeout()`: Wrapper genérico de retry para operações sujeitas a timeout
 - `aguardar_captcha()`: Aguarda a resolução humana e detecta expiração automaticamente
 
-### Tratamento de StaleElementReferenceException
-Elementos DOM que são destruídos e recriados durante navegação (especialmente Select2 de municípios ao trocar de estado) agora têm retry automático:
+### Select2: uma seleção por etapa
 
-- Detecta quando um elemento se torna "stale" (referência desatualizada)
-- Retenta automaticamente até 3 vezes com intervalo de 0.5s
-- Elimina falhas intermitentes causadas por re-renderização do DOM
+- Estado, Município, Curso, IES e Conceito são abertos uma vez por seleção bem-sucedida. Valores já confirmados no formulário são preservados.
+- A existência de Medicina é verificada na mesma abertura usada para selecioná-la. A enumeração de municípios/IES continua sendo uma operação separada.
+- Cada tentativa aguarda até 45 s no modo rápido ou 60 s no normal. A espera consulta novamente elementos recriados, sem reclicar durante o polling.
+- Somente falhas técnicas permitem retentativa, até três tentativas totais por operação. A recuperação verifica a página por até 30 s e aguarda CAPTCHA quando necessário; esses períodos são adicionais ao limite da tentativa.
+- Antes de reclicar, o helper relê o valor selecionado, inclusive quando a seleção terminou durante a recuperação. Timeout não é interpretado como curso inexistente.
+- O dropdown, a busca e os resultados são associados ao campo alvo. A IES é buscada pelo nome e validada pelo código quando disponível; correspondências ambíguas não são selecionadas.
+- Os fluxos principal, `--check`, `--review` e `--faltantes-txt` usam os mesmos helpers em `src/actions/select2.py`, sem loops externos de retentativa dos filtros.
+- A seleção aguarda o carregamento do próprio dropdown, sem bloquear em requisições jQuery de outros campos. Resultados são lidos em lote; uma IES identificada pelo código pode ser selecionada antes de enumerar páginas posteriores. Buscas ambíguas ainda exigem concluir a listagem.
+- Após a pesquisa, a troca de categoria é confirmada pela identidade/conteúdo das linhas. Categorias com a mesma quantidade de linhas não precisam consumir todo o limite de 8 s; se não houver atualização confirmada, o fluxo não autoriza ler a tabela anterior.
 
-Implementado em `src/actions/select2.py` na função `listar_opcoes_select2()`.
+Para testar interações em Chrome com Select2 4.0.13 real e servidor local (sem consultar o portal nem gravar resultados oficiais):
+
+```powershell
+$env:PYTHONIOENCODING = 'utf-8'
+$env:FIES_SELECT2_SMOKE = '1'
+python -B -m unittest discover -s tests -p 'test_select2_browser.py' -v
+```
+
+O teste exige Chrome e acesso ao CDN das versões fixadas de jQuery/Select2. Para capturas, defina `FIES_SELECT2_EVIDENCE` com uma pasta existente fora do repositório. A validação local não substitui o smoke test no portal com CAPTCHA humano.
 
 ### Executar apenas alguns estados (opcional)
 Edite o dicionário `ESTADOS` em [main.py](main.py) para reduzir o escopo, por exemplo:
@@ -196,12 +201,11 @@ Ele não pesquisa nem grava dados e compara os hashes dos CSV/TXT oficiais antes
 
 ## Estrutura do Projeto
 - [main.py](main.py): ponto de entrada que recebe argumentos CLI e chama a automação.
-- [src/app.py](src/app.py): orquestração do fluxo principal e parser de argumentos (`--modalidade`, `--check`, `--review`, `--fies-regular`, `--captcha-timeout`, `--server-pause`).
+- [src/app.py](src/app.py): orquestração do fluxo principal e parser de argumentos (--modalidade, --check, --review, --fies-regular, --captcha-timeout).
 - Configuração: [src/config/settings.py](src/config/settings.py) (FAST_MODE, FIES_MODALIDADE, BASE_URL, colunas), [src/config/estados.py](src/config/estados.py) (mapa UF → nome), reexportados por [src/config/__init__.py](src/config/__init__.py).
 - Núcleo: 
   - [src/core/browser.py](src/core/browser.py) (WebDriver)
   - [src/core/captcha.py](src/core/captcha.py) (estados, detecção, expiração e espera do CAPTCHA)
-  - [src/core/network.py](src/core/network.py) (rastreio resumido de requisições e classificação de 504/timeouts)
   - [src/core/utils.py](src/core/utils.py) (delays/normalização)
   - [src/core/retry.py](src/core/retry.py) (retry inteligente para timeout/504)
   - Reexportados por [src/core/__init__.py](src/core/__init__.py).
@@ -217,7 +221,7 @@ Ele não pesquisa nem grava dados e compara os hashes dos CSV/TXT oficiais antes
 ## Solução de Problemas
 - **Chrome/Driver:** `webdriver-manager` baixa o driver automaticamente; garanta que o Google Chrome esteja instalado e atualizado.
 - **CAPTCHA constante:** O site pode impor verificações; resolva-as no Chrome visível. A automação não resolve nem contorna o desafio. Se o limite configurado expirar, ela encerra com código `2`.
-- **Timeout/504 frequente:** O portal pode ficar lento em horários de pico. O script mantém a operação atual em ciclos automáticos; reduza ou aumente a pausa com `--server-pause`. Use `Ctrl+C` caso prefira encerrar e retomar depois.
+- **Timeout/504 frequente:** O portal pode ficar lento em horários de pico. O script aguarda automaticamente recuperação, mas se persistir, revise `notas_fies_medicina_falhas.csv` e tente novamente mais tarde.
 - **StaleElementReferenceException:** Já tratado automaticamente com retry (até 3 tentativas). Se ainda ocorrer, pode indicar mudanças no layout do site.
 - **Mudanças no site:** Seletores podem quebrar se o layout mudar. Ajuste os seletores no código conforme necessário.
 - **Permissões/antivírus:** Alguns antivírus bloqueiam automação de navegador; permita a execução do Python/ChromeDriver.

@@ -55,13 +55,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         metavar="SEGUNDOS",
         help="Tempo máximo para resolução humana do CAPTCHA (padrão: 300).",
     )
-    parser.add_argument(
-        "--server-pause",
-        type=_positive_int,
-        default=settings.SERVER_BUSY_PAUSE_SECONDS,
-        metavar="SEGUNDOS",
-        help="Pausa após três timeouts consecutivos do portal (padrão: 300).",
-    )
     args = parser.parse_args(argv)
 
     modalidade = None
@@ -74,20 +67,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings.FIES_MODALIDADE = modalidade
         print(f"Modalidade FIES selecionada: {modalidade.upper()}")
 
-    ctx = build_browser(
-        captcha_timeout_seconds=args.captcha_timeout,
-        server_pause_seconds=args.server_pause,
-    )
-    ctx.checkpoint.modalidade = settings.FIES_MODALIDADE
-    ctx.checkpoint.mode = (
-        "faltantes-txt"
-        if args.faltantes_txt is not None
-        else "review"
-        if args.review
-        else "check"
-        if args.check
-        else "normal"
-    )
+    ctx = build_browser(captcha_timeout_seconds=args.captcha_timeout)
     try:
         if args.faltantes_txt is not None:
             caminho_faltantes = args.faltantes_txt or None

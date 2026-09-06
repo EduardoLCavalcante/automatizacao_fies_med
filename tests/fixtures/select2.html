@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="pt-BR">
+<meta charset="utf-8">
+<title>FIES — teste local de Select2</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/select2/4.0.13/css/select2.min.css">
+<style>
+body{font:16px Arial,sans-serif;background:#f2f4f7;color:#263343;margin:40px auto;max-width:850px;padding:0 20px}
+main{background:white;padding:32px;border:1px solid #ccd4df;border-radius:8px}
+h1{font-size:24px} .field{display:block;margin:22px 0} .field span.caption{display:block;margin-bottom:8px}
+select{width:100%} .select2-container .select2-selection--single{height:34px}
+pre{white-space:pre-wrap;background:#eaf0f5;padding:16px} button{margin-top:20px;padding:8px 16px}
+</style>
+<main>
+<h1>FIES · validação local dos filtros</h1>
+<p>Componente Select2 real, com respostas locais e atraso controlado.</p>
+<input type="radio" name="modalidade" id="stCadunicoS" checked><label for="stCadunicoS">Fies Social</label>
+<input type="radio" name="modalidade" id="stCadunicoN"><label for="stCadunicoN">Fies</label>
+<label class="field"><span class="caption">Estado</span><select id="noEstado"><option value="">Selecione</option><option value="AM">AMAZONAS - AM</option></select></label>
+<label class="field"><span class="caption">Município</span><select id="noMunicipio" disabled><option value="">Selecione</option></select></label>
+<label class="field"><span class="caption">Curso</span><select id="noCursosPublico" disabled><option value="">Selecione</option></select></label>
+<label class="field"><span class="caption">IES</span><select id="iesPublico" disabled><option value="">Selecione</option></select></label>
+<label class="field"><span class="caption">Conceito</span><select id="conceitoCurso" disabled><option value="">Selecione</option></select></label>
+<button id="reset" type="button">Nova Consulta (simulada)</button>
+<pre id="events"></pre>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/select2/4.0.13/js/select2.min.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+window.events = []; window.opens = {}; window.selections = {}; window.preventions = 0;
+window.iesPages = [];
+$(document).ajaxSend((_event, _xhr, options) => {
+  if(options.url.startsWith('/ies')) window.iesPages.push(new URL(options.url, location.origin).searchParams.get('page'));
+});
+const ids = ['noEstado','noMunicipio','noCursosPublico','iesPublico','conceitoCurso'];
+function log(kind,id){
+  events.push({kind,id,time:Math.round(performance.now())});
+  document.getElementById('events').textContent = JSON.stringify({aberturas:opens,selecoes:selections},null,2);
+}
+for(const id of ids){
+  const options = {width:'100%',minimumResultsForSearch:0};
+  if(id==='iesPublico') options.ajax = {
+    url:'/ies', delay:250, data:p=>({q:p.term||'', page:p.page||1, scenario:params.get('scenario')||''}),
+    processResults:data=>data
+  };
+  $('#'+id).select2(options)
+    .on('select2:open',()=>{opens[id]=(opens[id]||0)+1;log('open',id)})
+    .on('select2:select',()=>{selections[id]=(selections[id]||0)+1;log('select',id)});
+}
+function clearAfter(index){
+  for(const id of ids.slice(index+1)) $('#'+id).empty().append(new Option('Selecione','')).prop('disabled',true).trigger('change.select2');
+}
+for(let index=0;index<ids.length-1;index++){
+  const id=ids[index], next=ids[index+1];
+  $('#'+id).on('change',function(){
+    clearAfter(index);
+    if(!this.value)return;
+    $.getJSON('/options',{field:next,parent:this.value,scenario:params.get('scenario')||''}, data=>{
+      for(const row of data) $('#'+next).append(new Option(row.text,row.id));
+      $('#'+next).prop('disabled',false).trigger('change.select2');
+    });
+  });
+}
+$('#iesPublico').on('select2:selecting', function(e){
+  const mode=params.get('scenario');
+  if(mode==='fail' || (mode==='retry' && !window.preventions) || (mode==='late' && !window.preventions)){
+    e.preventDefault(); window.preventions++;
+    if(mode==='late'){
+      const selected=e.params.args.data;
+      setTimeout(()=>$(this).append(new Option(selected.text,selected.id,true,true)).trigger('change'),1800);
+    }
+  }
+});
+$('#reset').on('click',()=>{
+  $('#noEstado').val('').trigger('change');
+  log('reset','form');
+});
+window.ready=true;
+</script>
+<section style="margin-top:80px">
+<h2>Resultado local — troca de categorias</h2>
+<button onclick="selecaoClassificaoTipoVaga(1)">Ampla</button>
+<button onclick="selecaoClassificaoTipoVaga(3)">PPIQ</button>
+<button onclick="selecaoClassificaoTipoVaga(2)">PCD</button>
+<table id="listaResultadoConsulta"><tbody><tr><td>Categoria inicial</td></tr></tbody></table>
+</section>
+<script>
+function selecaoClassificaoTipoVaga(tipo){
+  if(params.get('scenario')==='category-fail') return;
+  setTimeout(()=>{
+    const body=document.querySelector('#listaResultadoConsulta tbody');
+    const text='Categoria '+tipo;
+    if(params.get('scenario')==='category-inplace') body.rows[0].cells[0].textContent=text;
+    else body.innerHTML='<tr><td>'+text+'</td></tr>';
+  },150);
+}
+</script>
+</html>
