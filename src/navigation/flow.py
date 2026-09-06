@@ -32,6 +32,13 @@ def _aguardar_formulario(ctx: BrowserContext) -> None:
         raise PortalStateError("formulário de consulta não ficou disponível") from exc
 
 
+def _aguardar_formulario(ctx: BrowserContext) -> None:
+    try:
+        ctx.wait.until(EC.presence_of_element_located((By.ID, "select2-noEstado-container")))
+    except TimeoutException as exc:
+        raise PortalStateError("formulário de consulta não ficou disponível") from exc
+
+
 def preparar_primeira_pagina(ctx: BrowserContext) -> None:
     driver = ctx.driver
     ctx.captcha.reset()
