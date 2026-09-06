@@ -18,6 +18,7 @@ class BrowserContext:
     captcha_timeout_seconds: float = CAPTCHA_WAIT_TIMEOUT_SECONDS
     captcha: CaptchaMonitor = field(default_factory=CaptchaMonitor)
     cloudflare_checkpoint_completed: bool = False
+    select2_retries: int = 0
 
 
 def build_browser(

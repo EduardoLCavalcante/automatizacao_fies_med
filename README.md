@@ -154,14 +154,27 @@ Implementado em `src/core/retry.py` com as funções:
 - `com_retry_timeout()`: Wrapper genérico de retry para operações sujeitas a timeout
 - `aguardar_captcha()`: Aguarda a resolução humana e detecta expiração automaticamente
 
-### Tratamento de StaleElementReferenceException
-Elementos DOM que são destruídos e recriados durante navegação (especialmente Select2 de municípios ao trocar de estado) agora têm retry automático:
+### Select2: uma seleção por etapa
 
-- Detecta quando um elemento se torna "stale" (referência desatualizada)
-- Retenta automaticamente até 3 vezes com intervalo de 0.5s
-- Elimina falhas intermitentes causadas por re-renderização do DOM
+- Estado, Município, Curso, IES e Conceito são abertos uma vez por seleção bem-sucedida. Valores já confirmados no formulário são preservados.
+- A existência de Medicina é verificada na mesma abertura usada para selecioná-la. A enumeração de municípios/IES continua sendo uma operação separada.
+- Cada tentativa aguarda até 45 s no modo rápido ou 60 s no normal. A espera consulta novamente elementos recriados, sem reclicar durante o polling.
+- Somente falhas técnicas permitem retentativa, até três tentativas totais por operação. A recuperação verifica a página por até 30 s e aguarda CAPTCHA quando necessário; esses períodos são adicionais ao limite da tentativa.
+- Antes de reclicar, o helper relê o valor selecionado, inclusive quando a seleção terminou durante a recuperação. Timeout não é interpretado como curso inexistente.
+- O dropdown, a busca e os resultados são associados ao campo alvo. A IES é buscada pelo nome e validada pelo código quando disponível; correspondências ambíguas não são selecionadas.
+- Os fluxos principal, `--check`, `--review` e `--faltantes-txt` usam os mesmos helpers em `src/actions/select2.py`, sem loops externos de retentativa dos filtros.
+- A seleção aguarda o carregamento do próprio dropdown, sem bloquear em requisições jQuery de outros campos. Resultados são lidos em lote; uma IES identificada pelo código pode ser selecionada antes de enumerar páginas posteriores. Buscas ambíguas ainda exigem concluir a listagem.
+- Após a pesquisa, a troca de categoria é confirmada pela identidade/conteúdo das linhas. Categorias com a mesma quantidade de linhas não precisam consumir todo o limite de 8 s; se não houver atualização confirmada, o fluxo não autoriza ler a tabela anterior.
 
-Implementado em `src/actions/select2.py` na função `listar_opcoes_select2()`.
+Para testar interações em Chrome com Select2 4.0.13 real e servidor local (sem consultar o portal nem gravar resultados oficiais):
+
+```powershell
+$env:PYTHONIOENCODING = 'utf-8'
+$env:FIES_SELECT2_SMOKE = '1'
+python -B -m unittest discover -s tests -p 'test_select2_browser.py' -v
+```
+
+O teste exige Chrome e acesso ao CDN das versões fixadas de jQuery/Select2. Para capturas, defina `FIES_SELECT2_EVIDENCE` com uma pasta existente fora do repositório. A validação local não substitui o smoke test no portal com CAPTCHA humano.
 
 ### Executar apenas alguns estados (opcional)
 Edite o dicionário `ESTADOS` em [main.py](main.py) para reduzir o escopo, por exemplo:

@@ -1,146 +1,45 @@
-"""Seleção de rádios relacionados ao FIES (ex.: Fies Social)."""
+"""Seleção idempotente da modalidade, sem invalidar filtros já preenchidos."""
 
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 
-from src.core import BrowserContext, human_delay
+from src.core import BrowserContext
 
 
 def selecionar_radio_por_texto(ctx: BrowserContext, texto: str) -> bool:
-    driver, wait = ctx.driver, ctx.wait
-    alvo = texto.strip()
+    alvo = " ".join(texto.casefold().split())
 
-    radios = driver.find_elements(By.XPATH, "//input[@type='radio']")
-    for r in radios:
-        lbl = None
-        try:
-            lbl = r.find_element(By.XPATH, "following-sibling::label")
-        except Exception:
-            pass
-        if not lbl:
-            try:
-                lbl = r.find_element(By.XPATH, "ancestor::label")
-            except Exception:
-                pass
-
-        if lbl:
-            txt = lbl.text.strip()
-            if txt and alvo.upper() in txt.upper():
-                try:
-                    driver.execute_script("arguments[0].click()", lbl)
-                except Exception:
-                    lbl.click()
-                try:
-                    wait.until(lambda d: r.is_selected())
-                except TimeoutException:
-                    pass
-                human_delay(ctx.fast_mode, 0.2, 0.6)
-                return True
-
-    labels = driver.find_elements(By.XPATH, "//label")
-    for lbl in labels:
-        txt = lbl.text.strip()
-        if txt and alvo.upper() in txt.upper():
-            try:
-                driver.execute_script("arguments[0].click()", lbl)
-            except Exception:
-                lbl.click()
-            human_delay(ctx.fast_mode, 0.2, 0.6)
-            return True
+    def localizar(driver):
+        for radio in driver.find_elements(By.CSS_SELECTOR, "input[type='radio']"):
+            labels = radio.find_elements(By.XPATH, "following-sibling::label[1] | ancestor::label")
+            radio_id = radio.get_attribute("id")
+            if radio_id:
+                labels += driver.find_elements(By.CSS_SELECTOR, f'label[for="{radio_id}"]')
+            for label in labels:
+                if label.get_attribute('for') not in (None, '', radio_id):
+                    continue
+                if " ".join(label.text.casefold().split()) == alvo:
+                    return radio, label
+        return False
 
     try:
-        radio = wait.until(
-            EC.element_to_be_clickable(
-                (By.XPATH, f"//input[@type='radio' and following-sibling::label[contains(normalize-space(.), '{alvo}')]]")
-            )
-        )
-        driver.execute_script("arguments[0].click()", radio)
-        human_delay(ctx.fast_mode, 0.2, 0.6)
+        radio, label = ctx.wait.until(localizar)
+        if radio.is_selected():
+            return True
+        label.click()
+        # Reconsulta o DOM; @checked não reflete necessariamente o estado atual.
+        def confirmado(driver):
+            par = localizar(driver)
+            return bool(par and par[0].is_selected())
+        ctx.wait.until(confirmado)
         return True
-    except TimeoutException:
+    except (TimeoutException, StaleElementReferenceException):
         return False
 
 
 def selecionar_radio_fies_social(ctx: BrowserContext) -> bool:
-    driver, wait = ctx.driver, ctx.wait
-    alvo = "Fies Social"
-    if selecionar_radio_por_texto(ctx, alvo):
-        try:
-            marcado = driver.find_elements(By.XPATH, "//input[@type='radio' and (following-sibling::label[contains(normalize-space(.), 'Fies Social')] or ancestor::label[contains(normalize-space(.), 'Fies Social')]) and @checked]")
-            if marcado:
-                return True
-        except Exception:
-            pass
-    try:
-        lbl = wait.until(EC.element_to_be_clickable((By.XPATH, "//label[contains(normalize-space(.), 'Fies Social')]")))
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", lbl)
-        try:
-            lbl.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", lbl)
-        human_delay(ctx.fast_mode, 0.2, 0.6)
-        return True
-    except Exception:
-        pass
-    try:
-        el = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[self::label or self::span or self::div or self::button][contains(normalize-space(.), 'Fies Social')]")))
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
-        try:
-            el.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", el)
-        human_delay(ctx.fast_mode, 0.2, 0.6)
-        return True
-    except Exception:
-        return False
+    return selecionar_radio_por_texto(ctx, "Fies Social")
 
 
 def selecionar_radio_fies_regular(ctx: BrowserContext) -> bool:
-    """Seleciona o rádio FIES Regular (id=stCadunicoN, value=N)."""
-    driver, wait = ctx.driver, ctx.wait
-    alvo = "Fies"
-
-    # Tenta por texto genérico "Fies" (rótulo regular)
-    if selecionar_radio_por_texto(ctx, alvo):
-        try:
-            marcado = driver.find_elements(
-                By.XPATH,
-                "//input[@type='radio' and @id='stCadunicoN' and @value='N' and @checked]",
-            )
-            if marcado:
-                return True
-        except Exception:
-            pass
-
-    # Tenta clicar diretamente na label do regular
-    try:
-        lbl = wait.until(
-            EC.element_to_be_clickable(
-                (By.XPATH, "//label[contains(normalize-space(.), 'Fies') and not(contains(., 'Social'))]")
-            )
-        )
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", lbl)
-        try:
-            lbl.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", lbl)
-        human_delay(ctx.fast_mode, 0.2, 0.6)
-        return True
-    except Exception:
-        pass
-
-    # Fallback: clique direto no input pelo id/value
-    try:
-        radio = wait.until(
-            EC.element_to_be_clickable((By.XPATH, "//input[@type='radio' and @id='stCadunicoN' and @value='N']"))
-        )
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", radio)
-        try:
-            radio.click()
-        except Exception:
-            driver.execute_script("arguments[0].click();", radio)
-        human_delay(ctx.fast_mode, 0.2, 0.6)
-        return True
-    except Exception:
-        return False
+    return selecionar_radio_por_texto(ctx, "Fies")

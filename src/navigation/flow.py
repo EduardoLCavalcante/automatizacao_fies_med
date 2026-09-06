@@ -1,8 +1,10 @@
 """Navegação, recarga e reaplicação de filtros na página principal."""
 
+from dataclasses import dataclass
+
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
 
 import src.config.settings as settings
 from src.core import (
@@ -17,11 +19,17 @@ from src.config import BASE_URL
 from src.actions import (
     select2,
     select2_exact,
-    esperar_select2_habilitado,
     selecionar_radio_fies_social,
     selecionar_radio_fies_regular,
-    curso_existe,
 )
+from src.actions.select2 import OpcaoIndisponivel
+
+
+def _aguardar_formulario(ctx: BrowserContext) -> None:
+    try:
+        ctx.wait.until(EC.presence_of_element_located((By.ID, "select2-noEstado-container")))
+    except TimeoutException as exc:
+        raise PortalStateError("formulário de consulta não ficou disponível") from exc
 
 
 def _aguardar_formulario(ctx: BrowserContext) -> None:
@@ -63,8 +71,16 @@ def abrir_nova_consulta(ctx: BrowserContext) -> bool:
     return True
 
 
-def aplicar_filtros(ctx: BrowserContext, estado: str, municipio: str | None = None, curso: str | None = "MEDICINA") -> bool:
-    """Aplica estado e, opcionalmente, município e curso na página principal."""
+@dataclass(frozen=True)
+class ResultadoFiltros:
+    ok: bool
+    motivo: str
+    recuperado: bool = False
+
+
+def aplicar_filtros_detalhado(ctx: BrowserContext, estado: str, municipio: str | None = None, curso: str | None = "MEDICINA") -> ResultadoFiltros:
+    """Uma seleção por campo; cada helper é responsável por suas retentativas."""
+    retries_antes = ctx.select2_retries
     remove_loading_overlay(ctx)
     modalidade = getattr(settings, "FIES_MODALIDADE", "social").lower()
     radio_ok = (
@@ -74,33 +90,23 @@ def aplicar_filtros(ctx: BrowserContext, estado: str, municipio: str | None = No
     )
     if not radio_ok:
         print("⚠️ Não foi possível selecionar modalidade FIES")
-        return False
+        return ResultadoFiltros(False, "falha_transitoria")
     human_delay(ctx.fast_mode, 0.1, 0.3)
 
     try:
         select2(ctx, "select2-noEstado-container", estado)
-        human_delay(ctx.fast_mode, 0.2, 0.5)
-    except Exception:
-        return False
-
-    if municipio:
-        try:
+        if municipio:
             select2(ctx, "select2-noMunicipio-container", municipio)
-            human_delay(ctx.fast_mode, 0.2, 0.5)
-        except Exception:
-            return False
-        if curso:
-            try:
-                esperar_select2_habilitado(ctx, "select2-noCursosPublico-container")
-                if not curso_existe(ctx, curso):
-                    print(f"⏭️ {curso} não disponível — pulando município")
-                    return False
+            if curso:
                 select2_exact(ctx, "select2-noCursosPublico-container", curso)
-                human_delay(ctx.fast_mode, 0.2, 0.5)
-            except TimeoutException:
-                print(f"⚠️ Não foi possível selecionar {curso} após recarregar")
-                return False
-            except RuntimeError:
-                print(f"⏭️ {curso} não encontrado — pulando município")
-                return False
-    return True
+    except OpcaoIndisponivel as exc:
+        print(f"⏭️ Filtro indisponível após carregamento: {exc}")
+        return ResultadoFiltros(False, "indisponivel_confirmado", ctx.select2_retries > retries_antes)
+    except WebDriverException as exc:
+        print(f"⚠️ Falha técnica nos filtros: {type(exc).__name__}")
+        return ResultadoFiltros(False, "falha_transitoria", ctx.select2_retries > retries_antes)
+    return ResultadoFiltros(True, "ok", ctx.select2_retries > retries_antes)
+
+
+def aplicar_filtros(ctx: BrowserContext, estado: str, municipio: str | None = None, curso: str | None = "MEDICINA") -> bool:
+    return aplicar_filtros_detalhado(ctx, estado, municipio, curso).ok

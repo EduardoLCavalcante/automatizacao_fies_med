@@ -13,12 +13,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 import src.config.settings as settings
 from src.actions import (
-    curso_existe,
     listar_opcoes_select2,
     listar_opcoes_select2_multi,
     selecionar_radio_fies_social,
-    select2,
-    select2_exact,
     select2_exact_multi,
     select2_pick_first,
     esperar_select2_habilitado,
@@ -33,6 +30,7 @@ from src.core import (
     normalizar_decimal_pt,
 )
 from src.navigation import abrir_nova_consulta, aplicar_filtros, preparar_primeira_pagina
+from src.navigation.flow import aplicar_filtros_detalhado
 from src.scraping.extract import extrair_nota_enem_de_linha
 from src.scraping.table import (
     expandir_todos_candidatos,
@@ -226,6 +224,8 @@ def _selecionar_ies_para_review(
     # Mesmo padrão do fluxo principal: primeiro lista as opções disponíveis no município.
     try:
         opcoes = listar_opcoes_select2_multi(ctx, container_ids)
+    except CaptchaError:
+        raise
     except Exception:
         opcoes = []
 
@@ -250,13 +250,8 @@ def _selecionar_ies_para_review(
     if not candidato:
         return False, selecionado_nome
 
-    ok_ies = False
-    candidato_busca = _nome_sem_codigo_ies(candidato)
-    for _ in range(5):
-        ok_ies = select2_exact_multi(ctx, container_ids, candidato_busca)
-        if ok_ies and _ies_selecionado(ctx, container_ids[0], candidato):
-            break
-        human_delay(ctx.fast_mode, 0.2, 0.4)
+    ok_ies = select2_exact_multi(ctx, container_ids, candidato)
+    ok_ies = ok_ies and _ies_selecionado(ctx, container_ids[0], candidato)
 
     if ok_ies:
         try:
@@ -283,6 +278,8 @@ def _coletar_notas_ies_review(
         if select2_pick_first(ctx, "select2-conceitoCurso-container"):
             elc = ctx.driver.find_element(By.ID, "select2-conceitoCurso-container")
             conceito_valor = (elc.get_attribute("title") or elc.text or "").strip() or None
+    except CaptchaError:
+        raise
     except Exception:
         conceito_valor = None
 
@@ -383,19 +380,7 @@ def buscar_notas_por_municipio(
     ies_ja_salvos = ies_ja_salvos or set()
     caminho_csv = caminho_csv or _caminho_csv_modalidade()
 
-    select2(ctx, "select2-noMunicipio-container", municipio)
-    human_delay(ctx.fast_mode, 0.2, 0.5)
-
-    if not curso_existe(ctx, "MEDICINA"):
-        print("⏭️ Sem Medicina — pulando")
-        return resultados, pesquisa_executada
-
-    try:
-        select2_exact(ctx, "select2-noCursosPublico-container", "MEDICINA")
-    except TimeoutException:
-        print("⚠️ Não foi possível selecionar MEDICINA (exato)")
-        return resultados, pesquisa_executada
-    human_delay(ctx.fast_mode, 0.2, 0.5)
+    # Os filtros já foram confirmados pelo chamador em aplicar_filtros.
 
     ies_container_ids = ["select2-iesPublico-container"]
     try:
@@ -428,28 +413,15 @@ def buscar_notas_por_municipio(
             print(f"⏭️ IES já presente no CSV, pulando: {ies}")
             continue
         print(f"🏫 IES ({idx+1}/{len(ies_lista)}): {ies}")
-        ok_ies = False
-        codigo_selecionado: Optional[str] = None
         ies_nome_registro = ies
-        for tent in range(5):
-            # Busca da IES sempre pelo nome (sem código) para evitar quebrar o Select2.
-            ok_ies = select2_exact_multi(ctx, ies_container_ids, ies_nome_busca)
-            if not ok_ies and _ies_selecionado(ctx, ies_container_ids[0], ies):
-                ok_ies = True
-
-            if ok_ies and _ies_selecionado(ctx, ies_container_ids[0], ies):
-                try:
-                    selecionado = ctx.driver.find_element(By.ID, ies_container_ids[0]).get_attribute("title") or ctx.driver.find_element(By.ID, ies_container_ids[0]).text
-                    ies_nome_registro = selecionado or ies
-                    codigo_selecionado = _extrair_codigo_ies(selecionado)
-                    if codigo_lista and codigo_selecionado and codigo_lista != codigo_selecionado:
-                        print(f"⚠️ Código divergente entre opção ({codigo_lista}) e selecionado ({codigo_selecionado}) — armazenando o selecionado")
-                    print(f"✅ Selecionado: {selecionado}")
-                except Exception:
-                    pass
-                break
-            print(f"🔁 Retentando seleção da IES ({tent+1}/5): {ies}")
-            human_delay(ctx.fast_mode, 0.25, 0.5)
+        # O helper busca pelo nome, mas confirma também o código da opção.
+        ok_ies = select2_exact_multi(ctx, ies_container_ids, ies)
+        ok_ies = ok_ies and _ies_selecionado(ctx, ies_container_ids[0], ies)
+        if ok_ies:
+            el = ctx.driver.find_element(By.ID, ies_container_ids[0])
+            selecionado = el.get_attribute("title") or el.text
+            ies_nome_registro = selecionado or ies
+            print(f"✅ Selecionado: {selecionado}")
         if not ok_ies:
             print(f"⚠️ IES não selecionada após retentativas: {ies} — descartando sem salvar")
             if registrar_falha:
@@ -481,13 +453,7 @@ def buscar_notas_por_municipio(
             continue
 
         conceito_valor: Optional[str] = None
-        conceito_ok = False
-        for tent in range(2):
-            if select2_pick_first(ctx, conceito_container_presente):
-                conceito_ok = True
-                break
-            print(f"🔁 Retentando conceito ({tent+1}/2)")
-            human_delay(ctx.fast_mode, 0.2, 0.4)
+        conceito_ok = select2_pick_first(ctx, conceito_container_presente)
         if not conceito_ok:
             print("⚠️ Não foi possível selecionar o conceito após retentativas")
             continue
@@ -993,36 +959,6 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
         except Exception as exc:
             print(f"⚠️ Falha ao registrar faltante imediatamente: {exc}")
 
-    def _aplicar_filtros_check_resiliente(uf_val: str, estado_val: str, municipio_val: str, curso_val: str) -> Tuple[bool, str, int]:
-        tentativas_max = 3
-        for tentativa in range(1, tentativas_max + 1):
-            if aplicar_filtros(ctx, estado=estado_val, municipio=municipio_val, curso=curso_val):
-                return True, "ok", tentativa
-
-            disponibilidade_confirmada = []
-            for _ in range(2):
-                try:
-                    ok_base = aplicar_filtros(ctx, estado=estado_val, municipio=municipio_val, curso=None)
-                    if not ok_base:
-                        disponibilidade_confirmada.append(None)
-                    else:
-                        esperar_select2_habilitado(ctx, "select2-noCursosPublico-container")
-                        disponibilidade_confirmada.append(curso_existe(ctx, curso_val))
-                except Exception:
-                    disponibilidade_confirmada.append(None)
-                human_delay(ctx.fast_mode, 0.15, 0.3)
-
-            if disponibilidade_confirmada == [False, False]:
-                return False, "indisponivel_confirmado", tentativa
-
-            print(
-                f"🔁 Filtro de curso instável em {municipio_val}/{uf_val} "
-                f"(tentativa {tentativa}/{tentativas_max}) — retentando"
-            )
-            human_delay(ctx.fast_mode, 0.3, 0.6)
-
-        return False, "falha_transitoria", tentativas_max
-
     faltantes_nome, faltantes_codigo, ordem_municipios_reversa = _carregar_faltantes_conceito(caminho_csv)
     if faltantes_nome or faltantes_codigo:
         print(
@@ -1090,6 +1026,8 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
         else:
             try:
                 municipios = listar_opcoes_select2(ctx, "select2-noMunicipio-container")
+            except CaptchaError:
+                raise
             except Exception:
                 print("⚠️ Não foi possível listar municípios; avançando")
                 continue
@@ -1107,23 +1045,23 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
                     continue
 
             municipios_verificados += 1
-            ok_filtros, motivo_filtros, tentativas_filtros = _aplicar_filtros_check_resiliente(
-                uf, estado, municipio, curso
-            )
-            if not ok_filtros:
-                if motivo_filtros == "indisponivel_confirmado":
+            filtros = aplicar_filtros_detalhado(ctx, estado, municipio, curso)
+            if not filtros.ok:
+                if filtros.motivo == "indisponivel_confirmado":
                     municipios_indisponibilidade_confirmada += 1
-                    print(f"⏭️ {curso} indisponível após dupla checagem em {municipio}/{uf} — pulando município")
+                    print(f"⏭️ Filtro indisponível após carregamento em {municipio}/{uf} — pulando município")
                 else:
                     falhas_transitorias_municipio += 1
                     print(f"⚠️ Falha transitória ao aplicar filtros em {municipio}/{uf} — seguindo para o próximo")
                 continue
-            if tentativas_filtros > 1:
+            if filtros.recuperado:
                 municipios_recuperados_retry += 1
 
             try:
                 esperar_select2_habilitado(ctx, "select2-iesPublico-container")
                 ies_lista = listar_opcoes_select2_multi(ctx, ["select2-iesPublico-container"])
+            except CaptchaError:
+                raise
             except TimeoutException:
                 print("⚠️ IES ainda desabilitado após aguardar — pulando município")
                 ies_lista = []
@@ -1158,6 +1096,8 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
                     if select2_pick_first(ctx, "select2-conceitoCurso-container"):
                         elc = ctx.driver.find_element(By.ID, "select2-conceitoCurso-container")
                         conceito_valor = (elc.get_attribute("title") or elc.text or "").strip() or None
+                except CaptchaError:
+                    raise
                 except Exception:
                     conceito_valor = None
 
@@ -1174,26 +1114,15 @@ def run_checker(ctx: BrowserContext, curso: str = "MEDICINA", caminho_csv: Optio
                         print(f"⏭️ IES não está no CSV (uf={uf}, mun={municipio}, nome='{ies}') — não adicionando linha nova")
                     _registrar_faltante_txt(uf, municipio, ies, codigo_ies)
 
-                # fecha interações atuais; reconfigura filtros para o próximo IES sem nova consulta
+                # Fecha interações atuais; os filtros permanecem para a próxima IES.
                 try:
                     ctx.driver.find_element(By.TAG_NAME, "body").click()
                 except Exception:
                     pass
 
-                if idx_ies < len(ies_lista) - 1:
-                    ok_refiltro, motivo_refiltro, _ = _aplicar_filtros_check_resiliente(
-                        uf, estado, municipio, curso
-                    )
-                    if not ok_refiltro:
-                        if motivo_refiltro == "indisponivel_confirmado":
-                            municipios_indisponibilidade_confirmada += 1
-                            print(f"⏭️ {curso} indisponível após dupla checagem em {municipio}/{uf} durante refiltro")
-                        else:
-                            falhas_transitorias_municipio += 1
-                            print("⚠️ Não foi possível reaplicar filtros após IES por falha transitória")
-                        break
+                # O --check não navega para resultados: mantém os filtros para a próxima IES.
 
-            # antes do próximo município, reseta seleção de IES/curso para evitar travar selects
+            # Fecha interações antes de mudar o município.
             try:
                 ctx.driver.find_element(By.TAG_NAME, "body").click()
             except Exception:
