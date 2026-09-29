@@ -1,4 +1,4 @@
-from .runner import run_scraper, run_checker, run_review, run_faltantes_txt, buscar_notas_por_municipio
+from .runner import run_scraper, run_checker, run_review, run_faltantes_txt, run_preencher_notas_vazias, buscar_notas_por_municipio
 from .extract import extrair_nota_enem_de_modal, extrair_nota_enem_de_linha
 from .table import expandir_todos_candidatos, obter_ultima_linha_pre_selecionado, selecionar_categoria
 
@@ -7,6 +7,7 @@ __all__ = [
     "run_checker",
     "run_review",
     "run_faltantes_txt",
+    "run_preencher_notas_vazias",
     "buscar_notas_por_municipio",
     "extrair_nota_enem_de_modal",
     "extrair_nota_enem_de_linha",

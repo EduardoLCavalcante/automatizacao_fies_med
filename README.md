@@ -89,6 +89,10 @@ python main.py --faltantes-txt notas_fies_medicina_faltantes.txt
 
 # Executar faltantes da modalidade regular
 python main.py --faltantes-txt --modalidade regular
+
+# Preencher notas vazias nas IES já presentes no CSV
+python main.py --preencher-notas-vazias
+python main.py --preencher-notas-vazias --modalidade regular
 ```
 
 ### Comportamento em caso de CAPTCHA, timeout ou erro 504
@@ -115,6 +119,8 @@ Colunas:
 - **nota_enem_ultimo_ampla:** NOTA ENEM do último candidato na categoria Ampla
 - **nota_enem_ultimo_ppiq:** NOTA ENEM do último candidato na categoria PPIQ
 - **nota_enem_ultimo_pcd:** NOTA ENEM do último candidato na categoria PCD
+
+Quando uma categoria não tiver Pré-Selecionado, o coletor usa a nota do último candidato marcado como Vencido.
 
 ### Arquivo de falhas: [notas_fies_medicina_falhas.csv](notas_fies_medicina_falhas.csv)
 

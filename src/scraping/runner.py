@@ -40,6 +40,11 @@ from src.scraping.table import (
 
 
 _IES_CODIGO_RE = re.compile(r"\((\d{4,})\)\s*$")
+NOTAS_CATEGORIAS = (
+    "nota_enem_ultimo_ampla",
+    "nota_enem_ultimo_ppiq",
+    "nota_enem_ultimo_pcd",
+)
 
 
 def _filtrar_celulas_concorrencia(cells):
@@ -140,6 +145,59 @@ def salvar_incremental(rows: List[Dict], caminho: str = "notas_fies_medicina.csv
 def salvar_csv_completo(registros: List[Dict], caminho: str = "notas_fies_medicina.csv") -> None:
     df = pd.DataFrame(registros)
     df.to_csv(caminho, index=False, encoding="utf-8-sig")
+
+
+def _mesclar_notas_vazias(existente: Dict, coletado: Dict) -> bool:
+    alterou = False
+    for chave in NOTAS_CATEGORIAS:
+        atual = existente.get(chave)
+        novo = coletado.get(chave)
+        if (atual is None or not str(atual).strip()) and novo is not None and str(novo).strip():
+            existente[chave] = novo
+            alterou = True
+    return alterou
+
+
+def _alvos_com_notas_vazias(registros: List[Dict]) -> Dict[Tuple[str, str], Tuple[Set[str], Set[str]]]:
+    alvos: Dict[Tuple[str, str], Tuple[Set[str], Set[str]]] = {}
+    for registro in registros:
+        if all(str(registro.get(chave) or "").strip() for chave in NOTAS_CATEGORIAS):
+            continue
+        uf = str(registro.get("estado") or "").strip()
+        municipio = str(registro.get("municipio") or "").strip()
+        ies = str(registro.get("ies") or "").strip()
+        if not (uf and municipio and ies):
+            continue
+        nomes, codigos = alvos.get((uf, municipio), (set(), set()))
+        codigo = _extrair_codigo_ies(ies)
+        (codigos if codigo else nomes).add(codigo or _norm_label(ies))
+        alvos[(uf, municipio)] = nomes, codigos
+    return alvos
+
+
+def _mesclar_nota_na_ies(registros: List[Dict], coletado: Dict) -> bool:
+    codigo_coletado = _extrair_codigo_ies(str(coletado.get("ies") or ""))
+    chave_coletada = (
+        str(coletado.get("estado") or "").strip(),
+        str(coletado.get("municipio") or "").strip(),
+    )
+    alterou = False
+    for existente in registros:
+        if (
+            str(existente.get("estado") or "").strip(),
+            str(existente.get("municipio") or "").strip(),
+        ) != chave_coletada:
+            continue
+        codigo_existente = _extrair_codigo_ies(str(existente.get("ies") or ""))
+        if codigo_coletado and codigo_existente:
+            corresponde = codigo_coletado == codigo_existente
+        else:
+            corresponde = _norm_label(_nome_sem_codigo_ies(str(existente.get("ies") or ""))) == _norm_label(
+                _nome_sem_codigo_ies(str(coletado.get("ies") or ""))
+            )
+        if corresponde:
+            alterou = _mesclar_notas_vazias(existente, coletado) or alterou
+    return alterou
 
 
 FALHAS_COLUMNS = ["estado", "municipio", "curso", "ies", "ies_codigo", "motivo"]
@@ -374,6 +432,7 @@ def buscar_notas_por_municipio(
     ies_alvo_nome_norm: Optional[Set[str]] = None,
     ies_alvo_codigo: Optional[Set[str]] = None,
     caminho_csv: Optional[str] = None,
+    reprocessar_salvos: bool = False,
 ) -> Tuple[List[Dict], bool]:
     resultados: List[Dict] = []
     pesquisa_executada = False
@@ -409,7 +468,7 @@ def buscar_notas_por_municipio(
             ):
                 continue
 
-        if _norm_label(ies) in ies_ja_salvos:
+        if _norm_label(ies) in ies_ja_salvos and not reprocessar_salvos:
             print(f"⏭️ IES já presente no CSV, pulando: {ies}")
             continue
         print(f"🏫 IES ({idx+1}/{len(ies_lista)}): {ies}")
@@ -701,9 +760,11 @@ def run_scraper(
     ctx: BrowserContext,
     alvos_review: Optional[Dict[Tuple[str, str], Tuple[Set[str], Set[str]]]] = None,
     on_registro_salvo: Optional[Callable[[Dict], None]] = None,
+    atualizar_notas_vazias: bool = False,
+    caminho_csv: Optional[str] = None,
 ) -> None:
     driver = ctx.driver
-    caminho_csv = _caminho_csv_modalidade()
+    caminho_csv = caminho_csv or _caminho_csv_modalidade()
     existentes, ja_processados, ultimo_par, ies_por_mun = carregar_progresso(caminho_csv)
     dados_finais: List[Dict] = list(existentes)
 
@@ -718,7 +779,8 @@ def run_scraper(
     elif ja_processados and not modo_alvos:
         print("▶️ Registros existentes encontrados, iniciando do começo ignorando duplicados")
     elif modo_alvos:
-        print(f"▶️ Modo alvo: {len(alvos_review or {})} município(s) com IES do CSV de falhas")
+        origem_alvos = "notas vazias do CSV" if atualizar_notas_vazias else "CSV de falhas"
+        print(f"▶️ Modo alvo: {len(alvos_review or {})} município(s) com IES do {origem_alvos}")
 
     preparar_primeira_pagina(ctx)
 
@@ -791,13 +853,21 @@ def run_scraper(
                     ies_alvo_nome_norm=(alvos_review or {}).get((uf, municipio), (set(), set()))[0] if modo_alvos else None,
                     ies_alvo_codigo=(alvos_review or {}).get((uf, municipio), (set(), set()))[1] if modo_alvos else None,
                     caminho_csv=caminho_csv,
+                    salvar_automatico=not atualizar_notas_vazias,
+                    reprocessar_salvos=atualizar_notas_vazias,
                 )
                 if pesquisou:
                     estado_teve_pesquisa = True
                 for r in res:
-                    dados_finais.append(r)
+                    if atualizar_notas_vazias:
+                        if _mesclar_nota_na_ies(dados_finais, r):
+                            salvar_csv_completo(dados_finais, caminho=caminho_csv)
+                            if on_registro_salvo:
+                                on_registro_salvo(r)
+                    else:
+                        dados_finais.append(r)
                     ies_por_mun.setdefault((uf, municipio), set()).add(_norm_label(r.get("ies", "")))
-                    if on_registro_salvo:
+                    if on_registro_salvo and not atualizar_notas_vazias:
                         on_registro_salvo(r)
             except CaptchaError:
                 raise
@@ -1167,3 +1237,15 @@ def run_review(
         print("⚠️ Sem alvos válidos no CSV de falhas para executar --review")
         return
     run_scraper(ctx, alvos_review=alvos)
+
+
+def run_preencher_notas_vazias(ctx: BrowserContext, caminho_csv: Optional[str] = None) -> None:
+    caminho_csv = caminho_csv or _caminho_csv_modalidade()
+    registros, _, _, _ = carregar_progresso(caminho_csv)
+    alvos = _alvos_com_notas_vazias(registros)
+    total = sum(len(nomes) + len(codigos) for nomes, codigos in alvos.values())
+    if not total:
+        print("✅ Nenhuma IES com nota vazia encontrada")
+        return
+    print(f"▶️ Preenchendo notas vazias: {total} IES")
+    run_scraper(ctx, alvos_review=alvos, atualizar_notas_vazias=True, caminho_csv=caminho_csv)

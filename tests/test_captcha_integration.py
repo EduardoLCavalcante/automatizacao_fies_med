@@ -163,6 +163,7 @@ class AppCaptchaTests(unittest.TestCase):
             (["--check"], "run_checker"),
             (["--review"], "run_review"),
             (["--faltantes-txt"], "run_faltantes_txt"),
+            (["--preencher-notas-vazias"], "run_preencher_notas_vazias"),
         ]
         solved_snapshot = {
             "readyState": "complete",
@@ -205,6 +206,10 @@ class AppCaptchaTests(unittest.TestCase):
                             patch("src.app.run_checker", side_effect=verify_captcha) as checker,
                             patch("src.app.run_review", side_effect=verify_captcha) as review,
                             patch(
+                                "src.app.run_preencher_notas_vazias",
+                                side_effect=verify_captcha,
+                            ) as preencher,
+                            patch(
                                 "src.app.run_faltantes_txt",
                                 side_effect=verify_captcha,
                             ) as faltantes,
@@ -215,6 +220,7 @@ class AppCaptchaTests(unittest.TestCase):
                             "run_scraper": scraper,
                             "run_checker": checker,
                             "run_review": review,
+                            "run_preencher_notas_vazias": preencher,
                             "run_faltantes_txt": faltantes,
                         }[expected]
                         self.assertTrue(selected.called)

@@ -5,7 +5,7 @@ from typing import Sequence
 
 import src.config.settings as settings
 from src.core import CaptchaError, CaptchaTimeoutError, build_browser, shutdown_browser
-from src.scraping import run_scraper, run_checker, run_review, run_faltantes_txt
+from src.scraping import run_scraper, run_checker, run_review, run_faltantes_txt, run_preencher_notas_vazias
 
 
 def _positive_int(value: str) -> int:
@@ -49,6 +49,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Executa apenas alvos de um TXT de faltantes (padrão por modalidade se omitido).",
     )
     parser.add_argument(
+        "--preencher-notas-vazias",
+        action="store_true",
+        help="Reprocessa IES do CSV atual que tenham alguma nota por categoria vazia.",
+    )
+    parser.add_argument(
         "--captcha-timeout",
         type=_positive_int,
         default=settings.CAPTCHA_WAIT_TIMEOUT_SECONDS,
@@ -72,6 +77,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.faltantes_txt is not None:
             caminho_faltantes = args.faltantes_txt or None
             run_faltantes_txt(ctx, caminho_txt=caminho_faltantes)
+        elif args.preencher_notas_vazias:
+            run_preencher_notas_vazias(ctx)
         elif args.review:
             run_review(ctx)
         elif args.check:

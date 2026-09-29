@@ -129,6 +129,16 @@ def _linha_e_pre_selecionado(linha) -> bool:
     return False
 
 
+def _linha_e_vencido(linha) -> bool:
+    try:
+        spans = linha.find_elements(By.CSS_SELECTOR, "span.situacao-vencido")
+        if spans:
+            return any("vencido" in (s.text or "").lower() for s in spans)
+        return "vencido" in (linha.text or "").lower()
+    except Exception:
+        return False
+
+
 def obter_ultima_linha_pre_selecionado(ctx: BrowserContext):
     wait = ctx.wait
     try:
@@ -145,6 +155,9 @@ def obter_ultima_linha_pre_selecionado(ctx: BrowserContext):
     linhas = ctx.driver.find_elements(By.XPATH, "//table[@id='listaResultadoConsulta']//tr | //table/tbody/tr")
     for linha in reversed(linhas):
         if _linha_e_pre_selecionado(linha):
+            return linha
+    for linha in reversed(linhas):
+        if _linha_e_vencido(linha):
             return linha
     return None
 
